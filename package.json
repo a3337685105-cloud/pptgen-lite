@@ -1,0 +1,88 @@
+{
+  "name": "pptgen-studio-lite",
+  "version": "1.0.1",
+  "productName": "PPTGEN Studio",
+  "description": "AI PPT Generator - Smart slide creation tool",
+  "main": "electron-main.js",
+  "bin": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "electron": "electron .",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win"
+  },
+  "pkg": {
+    "scripts": [
+      "server.js",
+      "workflow-service.js",
+      "scripts/**/*.js"
+    ],
+    "assets": [
+      "public/**/*"
+    ],
+    "targets": [
+      "node18-win-x64"
+    ],
+    "outputPath": "dist"
+  },
+  "build": {
+    "appId": "com.pptgen.studio-lite",
+    "productName": "PPTGEN Studio",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "server.js",
+      "workflow-service.js",
+      "electron-main.js",
+      "package.json",
+      "public/**",
+      "data/**",
+      "generated-images/**",
+      "exports/**",
+      "node_modules/**",
+      "!node_modules/electron/**",
+      "!node_modules/electron-builder/**"
+    ],
+    "extraResources": [
+      {
+        "from": ".env.local",
+        "to": ".env.local"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "public/v2/assets/pptgen-icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "public/v2/assets/pptgen-icon.ico",
+      "uninstallerIcon": "public/v2/assets/pptgen-icon.ico",
+      "installerHeaderIcon": "public/v2/assets/pptgen-icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PPTGEN Studio"
+    }
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2",
+    "jszip": "^3.10.1",
+    "multer": "^2.1.1",
+    "pdf-parse": "^2.4.5",
+    "pptxgenjs": "^4.0.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^26.8.1"
+  }
+}

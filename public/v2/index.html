@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PPTGEN | AI 控制台</title>
+    <link rel="icon" type="image/png" href="/v2/assets/pptgen-icon.png" />
+    <link rel="stylesheet" href="/v2/styles.css?v=20260430-prompt-split1" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">P</div>
+          <div>
+            <div class="brand-title">PPTGEN</div>
+            <div class="brand-subtitle">PPTGEN Console</div>
+          </div>
+        </div>
+
+        <nav class="sidebar-nav" aria-label="主导航">
+          <button class="sidebar-tab is-active" type="button" data-tab="smart">
+            <span class="sidebar-tab-kicker">主线</span>
+            <span class="sidebar-tab-label">智能生成</span>
+          </button>
+          <button class="sidebar-tab" type="button" data-tab="history">
+            <span class="sidebar-tab-kicker">历史</span>
+            <span class="sidebar-tab-label">历史生图</span>
+          </button>
+          <button class="sidebar-tab" type="button" data-tab="revise">
+            <span class="sidebar-tab-kicker">编辑</span>
+            <span class="sidebar-tab-label">改图 / 框选</span>
+          </button>
+          <button class="sidebar-tab" type="button" data-tab="settings">
+            <span class="sidebar-tab-kicker">配置</span>
+            <span class="sidebar-tab-label">接口与参数</span>
+          </button>
+        </nav>
+
+        <section class="sidebar-card compact">
+          <div class="sidebar-card-title">页面缩放</div>
+          <div class="zoom-row">
+            <input id="workspaceZoomRange" type="range" min="50" max="140" step="5" value="100" />
+            <span id="workspaceZoomValue">100%</span>
+          </div>
+        </section>
+
+        <section class="sidebar-card workflow-note">
+          <div class="sidebar-card-title">使用提示</div>
+          <p>本工具生成的 PPT 是纯图片，不同于常规 PPT，无法通过普通对象编辑。</p>
+          <p>若图片生成有误，可直接重新生成，或在改图区通过描述/划定区域定位元素并修改。</p>
+          <p>若仅是文字渲染错误，可在 Office 中用同色块覆盖后手动打字修正。</p>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <div class="workspace-body">
+          <section class="view is-active" id="view-smart" data-view="smart">
+            <div class="view-header">
+              <div>
+                <span class="eyebrow">PPTGEN</span>
+                <h1>智能生成</h1>
+              </div>
+              <div class="status-line" id="statusBar"></div>
+            </div>
+
+            <section class="smart-ribbon">
+              <button class="ribbon-step is-active" type="button" data-step="split">
+                <span>1</span>
+                <strong>内容与拆分</strong>
+              </button>
+              <div class="ribbon-arrow" aria-hidden="true"></div>
+              <button class="ribbon-step" type="button" data-step="pages">
+                <span>2</span>
+                <strong>逐页确认与生成</strong>
+              </button>
+            </section>
+
+            <p class="ribbon-meta" id="workflowRibbonMeta"></p>
+
+            <div class="smart-stage-shell">
+              <!-- 隐藏的模型选择器，保持 JS 兼容 -->
+              <select id="workflowImageModelEntry" class="sr-only" aria-label="最终生图模型" hidden>
+                <option value="gpt-image-2">GPT Image 2</option>
+              </select>
+              <div id="workflowModelHint" hidden></div>
+              <button id="confirmWorkflowModelBtn" hidden></button>
+              <!-- 风格相关隐藏元素，保持 JS 兼容 -->
+              <input id="themeName" type="hidden" />
+              <select id="themeDecorationLevel" hidden><option value="medium">中等</option></select>
+              <select id="prefStyleMode" hidden><option value="business">商务清晰</option></select>
+              <select id="prefLayoutVariety" hidden><option value="balanced">稳中有变</option></select>
+              <select id="prefDetailLevel" hidden><option value="polished">精致均衡</option></select>
+              <select id="prefVisualDensity" hidden><option value="balanced">疏密均衡</option></select>
+              <select id="prefCompositionFocus" hidden><option value="balanced">图文均衡</option></select>
+              <select id="prefDataNarrative" hidden><option value="balanced">适度增强</option></select>
+              <select id="prefPageMood" hidden><option value="modern">现代清晰</option></select>
+              <div id="preferenceSummary" hidden></div>
+              <div id="themeSummaryPreview" hidden></div>
+              <div id="themePromptTabs" hidden></div>
+              <pre id="themeModelPrompt" hidden></pre>
+              <button id="generateThemeBtn" hidden></button>
+              <button id="cancelThemeBtn" hidden></button>
+              <button id="confirmThemeBtn" hidden></button>
+              <button id="goSplitBtn" hidden></button>
+
+              <section class="smart-stage is-active" data-step-panel="split">
+                <div class="split-stage-grid">
+                  <article class="glass-card split-input-card">
+                    <div class="card-heading">
+                      <span class="eyebrow">Step 1</span>
+                      <h2>输入内容</h2>
+                    </div>
+                    <div class="quick-api-panel">
+                      <label class="field">
+                        <span>DashScope / Qwen API Key</span>
+                        <input id="quickApiKey" type="password" placeholder="用于内容拆分和风格匹配" />
+                      </label>
+                      <label class="field" id="quickOpenAiImageKeyField">
+                        <span>GPT API Key</span>
+                        <input id="quickOpenAiImageApiKey" type="password" placeholder="用于 gpt-image-2" />
+                      </label>
+                      <label class="field" id="quickOpenAiImageBaseUrlField">
+                        <span>GPT Host / Endpoint</span>
+                        <input id="quickOpenAiImageBaseUrl" type="text" placeholder="https://api.bltcy.ai, https://backup-host" />
+                      </label>
+                      <button class="btn secondary" type="button" id="quickTestApiKeyBtn">测试 Key</button>
+                    </div>
+                    <div class="split-control-grid">
+                      <label class="field">
+                        <span>目标页数</span>
+                        <input id="workflowPageCount" type="number" min="2" max="120" value="8" />
+                      </label>
+                      <label class="field">
+                        <span>AI 处理模式</span>
+                        <select id="aiProcessingMode">
+                          <option value="expand">拆分并扩写</option>
+                          <option value="split">仅拆分</option>
+                        </select>
+                      </label>
+                      <label class="field">
+                        <span>每页目标字数</span>
+                        <input id="workflowTargetChars" type="number" min="0" max="300" placeholder="拆分并扩写时启用" />
+                      </label>
+                      <label class="field">
+                        <span>每页最大字数</span>
+                        <input id="workflowMaxChars" type="number" min="0" max="400" placeholder="默认 200，0 表示不压缩" />
+                      </label>
+                    </div>
+                    <label class="field field-stack">
+                      <span>主文本</span>
+                      <textarea id="workflowContent" rows="18" placeholder="把需要生成 PPT 的主文本粘贴到这里。"></textarea>
+                    </label>
+                  </article>
+
+                  <article class="glass-card reference-card">
+                    <div class="card-heading">
+                      <span class="eyebrow">Reference</span>
+                      <h2>上传参考文件</h2>
+                      <p>支持文本、Office、PDF 和图片。图片会作为视觉参考进入后续上下文。</p>
+                    </div>
+                    <div class="upload-zone">
+                      <button class="btn secondary" type="button" id="pickReferenceFilesBtn">上传参考文件</button>
+                      <input id="referenceFilesInput" type="file" accept=".txt,.md,.csv,.json,.jsonl,.html,.htm,.xml,.yaml,.yml,.docx,.pptx,.pdf,.xls,.xlsx,image/*" multiple hidden />
+                      <span>txt / docx / pptx / xlsx / pdf / image</span>
+                    </div>
+                    <div class="file-list" id="referenceFilesList"></div>
+                    <div class="stage-footer">
+                      <button class="btn ghost" type="button" id="backToThemeBtn" hidden>上一步</button>
+                      <div class="action-group">
+                        <button class="btn ghost cancel-btn" type="button" id="cancelSplitBtn" hidden>取消</button>
+                        <button class="btn secondary" type="button" id="skipSplitBtn">跳过拆分</button>
+                        <button class="btn primary" type="button" id="runSplitBtn">开始拆分</button>
+                      </div>
+                    </div>
+                  </article>
+                </div>
+              </section>
+
+              <section class="smart-stage" data-step-panel="pages">
+                <div class="pages-stage-grid">
+                  <article class="glass-card page-list-card">
+                    <div class="card-heading">
+                      <div>
+                        <h2>页面列表</h2>
+                      </div>
+                      <div class="page-list-actions">
+                        <button class="btn secondary" type="button" id="batchGenerateReadyBtn">一键生成</button>
+                        <button class="btn ghost cancel-btn" type="button" id="cancelBatchGenerateBtn" hidden>停止生成</button>
+                        <button class="btn ghost add-page-btn" type="button" id="addManualPageBtn" title="添加一页">＋</button>
+                      </div>
+                    </div>
+                    <div class="workflow-stats" id="workflowStats"></div>
+                    <div class="page-list" id="workflowPageList"></div>
+                  </article>
+
+                  <article class="glass-card onscreen-card">
+                    <div class="card-heading">
+                      <h2>上屏内容</h2>
+                      <p id="pageMetaHint"></p>
+                    </div>
+                    <label class="field page-style-keyword-field" id="pageGlobalStylePromptField">
+                      <span>风格关键词</span>
+                      <input id="pageGlobalStylePrompt" type="text" placeholder="例如：浅色、通透、杂志感、蓝灰配色" />
+                    </label>
+                    <div class="onscreen-preview" id="pageOnscreenPreview"></div>
+                    <label class="field field-stack grow">
+                      <span>正文</span>
+                      <textarea id="pageOnscreenEditor" rows="20" placeholder="这里展示并允许修改当前页的上屏内容。"></textarea>
+                    </label>
+                    <div class="stage-footer tight">
+                      <button class="btn ghost cancel-btn" type="button" id="cancelRepreparePageBtn" hidden>取消</button>
+                                                                </div>
+                  </article>
+
+                  <article class="glass-card artboard-card">
+                    <div class="card-heading">
+                      <h2>生图/改图区</h2>
+                    </div>
+                    <div class="artboard-workspace">
+                      <div class="artboard-toolbar">
+                        <button class="btn ghost" type="button" id="uploadOverlayBtn">上传补充图片</button>
+                        <input id="overlayFileInput" type="file" accept="image/*" multiple hidden />
+                        <button class="btn ghost" type="button" id="clearOverlayBtn">清空叠加</button>
+                      </div>
+                      <div class="slide-frame" id="slideFrame">
+                        <div class="slide-stage" id="slideStage">
+                          <img id="slideBaseImage" alt="" hidden />
+                          <div class="slide-empty" id="slideEmptyState">生成前这里是空白画布。生成后，结果图会自动成为这页的底图。</div>
+                          <div class="overlay-layer" id="overlayLayer"></div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="stage-footer tight">
+                      <button class="btn ghost cancel-btn" type="button" id="cancelGenerateCurrentPageBtn" hidden>取消</button>
+                      <button class="btn secondary" type="button" id="viewCurrentPageLargeBtn" disabled>查看大图</button>
+                      <button class="btn secondary" type="button" id="copyPagePromptBtn" disabled>复制提示词</button>
+                      <button class="btn secondary" type="button" id="modifyCurrentPageBtn" disabled>按要求修改</button>
+                      <button class="btn secondary" type="button" id="saveCurrentPageImageBtn" disabled>另存图片</button>
+                      <button class="btn primary" type="button" id="generateCurrentPageBtn">生成该页</button>
+                    </div>
+                    <label class="field field-stack" id="pageExtraPromptField">
+                      <span>该页提示词</span>
+                      <textarea id="pageExtraPrompt" rows="5" placeholder="可补充本页的画面、内容或修改要求，再点击“生成该页”或“按要求修改”。"></textarea>
+                    </label>
+                    <div class="result-strip" id="pageResultStrip"></div>
+                    <details class="trace-details prompt-trace-details" hidden>
+                      <summary>查看这一页的 Prompt 流转</summary>
+                      <pre id="pagePromptTrace"></pre>
+                    </details>
+                    <div class="export-deck-row">
+                      <button class="btn secondary" type="button" id="exportWorkflowPptBtn" disabled>一键导出 PPT</button>
+                    </div>
+                  </article>
+                </div>
+                <div class="stage-footer pages-workbench-footer">
+                  <button class="btn ghost" type="button" id="backToSplitBtn">上一步</button>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section class="view" id="view-history" data-view="history">
+            <div class="view-header">
+              <div>
+                <span class="eyebrow">PPTGEN</span>
+                <h1>历史生图</h1>
+              </div>
+            </div>
+            <div class="history-layout">
+              <article class="glass-card history-projects-card">
+                <div class="card-heading">
+                  <h2>项目列表</h2>
+                </div>
+                <div class="workflow-stats" id="historySummary"></div>
+                <div class="history-project-list" id="historyProjectList"></div>
+              </article>
+              <article class="glass-card history-detail-card">
+                <div class="card-row">
+                  <div class="card-heading">
+                    <h2>项目详情</h2>
+                    <p id="historyProjectMeta"></p>
+                  </div>
+                  <button class="btn secondary" type="button" id="restoreHistoryProjectBtn" disabled>恢复到工作台</button>
+                </div>
+                <div class="history-page-grid" id="historyPageGrid"></div>
+              </article>
+            </div>
+          </section>
+
+          <section class="view" id="view-revise" data-view="revise">
+            <div class="view-header">
+              <div>
+                <span class="eyebrow">PPTGEN</span>
+                <h1>改图 / 框选</h1>
+              </div>
+            </div>
+            <div class="revise-grid">
+              <article class="glass-card revise-board-card">
+                <div class="revise-mini-toolbar">
+                  <div class="revise-draw-toolbar" id="reviseDrawToolbar" style="display: flex; align-items: center; gap: 8px; border-right: 1px solid rgba(0,0,0,0.1); padding-right: 12px; margin-right: 4px;">
+                    <button class="icon-btn tool-btn" type="button" id="reviseDrawPenBtn" title="画笔" style="font-size: 13px; width: auto; padding: 0 8px;">画笔</button>
+                    <button class="icon-btn tool-btn" type="button" id="reviseDrawRectBtn" title="矩形" style="font-size: 13px; width: auto; padding: 0 8px;">矩形</button>
+                    <label class="tool-color" for="reviseDrawColorInput" style="display: flex; align-items: center; gap: 4px; font-size: 13px; cursor: pointer;">
+                      <span>颜色</span>
+                      <input id="reviseDrawColorInput" type="color" value="#22d3ee" style="width: 24px; height: 24px; padding: 0; border: none; border-radius: 4px; cursor: pointer;"/>
+                    </label>
+                    <button class="icon-btn" type="button" id="clearReviseDrawingBtn" title="清空绘制" style="font-size: 13px; width: auto; padding: 0 8px;">清空绘制</button>
+                  </div>
+                  <button class="icon-btn" type="button" id="revisePrevBtn" title="上一张" style="width:auto;padding:0 10px;font-size:13px;">← 前一张</button>
+                  <button class="icon-btn" type="button" id="reviseNextBtn" title="下一张" style="width:auto;padding:0 10px;font-size:13px;">后一张 →</button>
+                  <button class="icon-btn" type="button" id="reviseImportBtn" title="导入本地图" style="width:auto;padding:0 10px;font-size:13px;">＋ 导入</button>
+                  <button class="icon-btn danger" type="button" id="reviseDeleteBtn" title="删除当前图" style="width:auto;padding:0 10px;font-size:13px;">× 删除</button>
+                  <input id="reviseFileInput" type="file" accept="image/*" multiple hidden />
+                </div>
+                <div class="revise-meta">
+                  <strong id="reviseImageName">请先导入底图</strong>
+                  <span id="reviseImageCounter">0 / 0</span>
+                </div>
+                <div class="revise-stage" id="reviseStage">
+                  <img id="reviseBaseImage" alt="" hidden />
+                  <canvas id="reviseCanvas"></canvas>
+                  <div class="slide-empty" id="reviseEmptyState">还没有底图。导入本地图片后就可以开始框选。</div>
+                  <button class="icon-btn" type="button" id="exportReviseImageBtn" title="导出当前图片" style="position:absolute;bottom:10px;right:10px;width:auto;padding:6px 12px;font-size:13px;z-index:10;display:none;">⬇ 导出图片</button>
+                </div>
+                <div class="thumb-strip" id="reviseThumbStrip"></div>
+                <div class="result-strip" id="reviseHistoryStrip" style="margin-top:12px;"></div>
+              </article>
+              <article class="glass-card revise-control-card">
+                <div class="card-heading">
+                  <h2>改图提示词</h2>
+                </div>
+                <label class="field field-stack grow">
+                  <span>编辑说明</span>
+                  <textarea id="revisePrompt" rows="14" placeholder="描述需要修改的内容。若已经框选，系统会优先针对选区改动。"></textarea>
+                </label>
+                <div class="stage-footer tight">
+                  <button class="btn ghost cancel-btn" type="button" id="cancelReviseBtn" hidden>取消</button>
+                  <button class="btn primary" type="button" id="sendReviseBtn">提交修改</button>
+                </div>
+                <div class="result-strip" id="reviseResultStrip"></div>
+              </article>
+            </div>
+          </section>
+
+          <section class="view" id="view-settings" data-view="settings">
+            <div class="view-header">
+              <div>
+                <span class="eyebrow">PPTGEN</span>
+                <h1>接口与参数</h1>
+                <details class="credits-easter-egg">
+                  <summary>制作信息</summary>
+                  <p>qzws，gpt5.5，gpt5.4，kimiK2.6，gemini3.1pro共同制作，流程灵感来源于BV1wwzsBiETR，Bilibili YangAgent</p>
+                </details>
+              </div>
+            </div>
+            <div class="settings-grid">
+              <article class="glass-card">
+                <div class="card-heading">
+                  <h2>文本模型</h2>
+                </div>
+                <div class="settings-stack">
+                  <label class="field">
+                    <span>DashScope / Qwen API Key</span>
+                    <input id="apiKey" type="password" placeholder="用于主题、拆分和整理" />
+                  </label>
+                  <label class="field">
+                    <span>区域</span>
+                    <select id="region">
+                      <option value="beijing">北京</option>
+                    </select>
+                  </label>
+                </div>
+              </article>
+
+              <article class="glass-card">
+                <div class="card-heading">
+                  <h2>GPT 图片接口</h2>
+                </div>
+                <div class="settings-stack">
+                  <label class="field" hidden>
+                    <span>最终生图模型</span>
+                    <select id="workflowImageModel">
+                      <option value="gpt-image-2">GPT Image 2</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>GPT API Key</span>
+                    <input id="openAiImageApiKey" type="password" placeholder="用于 gpt-image-2" />
+                  </label>
+                  <label class="field">
+                    <span>GPT Host / Endpoint</span>
+                    <input id="openAiImageBaseUrl" type="text" placeholder="https://api.bltcy.ai, https://your-backup-host" />
+                    <span class="field-hint" style="font-size: 12px; color: #94a3b8; margin-top: 2px; display: block;">注意：OpenAI 官方 API 在中国大陆可能无法直接访问，建议使用中转代理地址</span>
+                  </label>
+                  <label class="field">
+                    <span>神马中转 API Key</span>
+                    <input id="whatAiImageApiKey" type="password" placeholder="https://api.whatai.cc fallback key" />
+                    <span class="field-hint" style="font-size: 12px; color: #94a3b8; margin-top: 2px; display: block;">主接口 60 秒未返回时自动使用神马中转异步生图。</span>
+                  </label>
+                  <div class="stage-footer tight">
+                    <button class="btn ghost cancel-btn" type="button" id="cancelTestApiKeyBtn" hidden>取消</button>
+                    <button class="btn secondary" type="button" id="testApiKeyBtn">测试 Key</button>
+                  </div>
+                </div>
+              </article>
+
+              <article class="glass-card">
+                <div class="card-heading">
+                  <h2>输出参数</h2>
+                </div>
+                <div class="settings-stack">
+                  <label class="field">
+                    <span>页面比例</span>
+                    <select id="slideAspect">
+                      <option value="16:9">16:9</option>
+                      <option value="4:3">4:3</option>
+                      <option value="1:1">1:1</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>输出尺寸</span>
+                    <select id="outputSize">
+                      <option value="1K">1K</option>
+                      <option value="2K">2K</option>
+                      <option value="4K">4K</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>随机种子</span>
+                    <input id="seed" type="number" placeholder="可选" />
+                  </label>
+                </div>
+              </article>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+    <div class="status-toast" id="statusToast" hidden></div>
+    <div class="image-modal" id="pageImageModal" hidden>
+      <div class="image-modal-backdrop" data-close-page-image-modal></div>
+      <div class="image-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="pageImageModalTitle">
+        <div class="image-modal-header">
+          <strong id="pageImageModalTitle">当前页大图</strong>
+          <div class="image-modal-actions">
+            <button class="btn secondary" type="button" id="savePageImageModalBtn">另存图片</button>
+            <button class="icon-btn" type="button" id="closePageImageModalBtn" aria-label="关闭大图">×</button>
+          </div>
+        </div>
+        <div class="image-modal-body">
+          <img id="pageImageModalImg" alt="当前页大图" />
+        </div>
+      </div>
+    </div>
+    <script src="/v2/app.js?v=20260430-prompt-split1"></script>
+  </body>
+</html>
