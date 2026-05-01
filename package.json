@@ -1,6 +1,6 @@
 {
   "name": "pptgen-studio-lite",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "productName": "PPTGEN Studio",
   "description": "AI PPT Generator - Smart slide creation tool",
   "main": "electron-main.js",
@@ -38,18 +38,9 @@
       "electron-main.js",
       "package.json",
       "public/**",
-      "data/**",
-      "generated-images/**",
-      "exports/**",
       "node_modules/**",
       "!node_modules/electron/**",
       "!node_modules/electron-builder/**"
-    ],
-    "extraResources": [
-      {
-        "from": ".env.local",
-        "to": ".env.local"
-      }
     ],
     "win": {
       "target": [
