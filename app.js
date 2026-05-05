@@ -7,6 +7,8 @@ const OPENAI_WORKFLOW_MODELS = new Set([
 ]);
 const OPENAI_IMAGE_DEFAULT_HOST = "https://api.bltcy.ai";
 const MAX_REVISE_BOXES = 2;
+const SLIDE_EMPTY_DEFAULT_TEXT = "生成前这里是空白画布。生成后，结果图会自动成为这页的底图。";
+const SLIDE_IMAGE_BROKEN_TEXT = "图片文件或链接已失效，无法显示。可以切换历史版本，或重新生成这一页。";
 
 const DEFAULT_PREFERENCES = {
   styleMode: "business",
@@ -444,7 +446,10 @@ function isAbortError(error) {
 }
 
 function isMissingWorkflowJobError(error) {
-  return String(error?.message || "").includes("找不到对应的工作流任务");
+  const code = String(error?.code || "");
+  const message = String(error?.message || "");
+  return code === "WorkflowJobNotFound"
+    || /WorkflowJobNotFound|找不到对应的工作流任务|读取工作流任务失败/.test(`${code} ${message}`);
 }
 
 function clamp(value, min, max) {
@@ -1117,13 +1122,18 @@ function sanitizeRecoveredWorkflowJob(job) {
     normalizedPage.visualElementsPrompt = String(normalizedPage.visualElementsPrompt || "");
     normalizedPage.visualElementsDisplay = String(normalizedPage.visualElementsDisplay || normalizedPage.visualElementsPrompt || "");
     normalizedPage.pageStylePrompt = String(normalizedPage.pageStylePrompt || "");
-    normalizedPage.resultImages = Array.isArray(normalizedPage.resultImages)
-      ? Array.from(new Set(normalizedPage.resultImages.filter(Boolean)))
-      : [];
-    if (normalizedPage.baseImage && !normalizedPage.resultImages.includes(normalizedPage.baseImage)) {
-      normalizedPage.resultImages.push(normalizedPage.baseImage);
+    normalizedPage.baseImage = String(normalizedPage.baseImage || "");
+    normalizedPage.resultImages = Array.from(new Set([
+      normalizedPage.baseImage,
+      ...(Array.isArray(normalizedPage.resultImages) ? normalizedPage.resultImages : []),
+    ].filter(Boolean)));
+    if (!normalizedPage.baseImage && normalizedPage.resultImages[0]) {
+      normalizedPage.baseImage = normalizedPage.resultImages[0];
     }
     normalizedPage.generated = Boolean(normalizedPage.generated || normalizedPage.resultImages.length);
+    if (normalizedPage.generated && !["running", "error"].includes(normalizedPage.generationStatus)) {
+      normalizedPage.generationStatus = "done";
+    }
     return normalizedPage;
   });
   return job;
@@ -1430,7 +1440,50 @@ function renderHistoryProjectsLegacy() {
   });
 }
 
-function restoreHistoryProject() {
+async function restoreWorkflowJobOnServer(job = state.workflowJob) {
+  if (!job?.id || !Array.isArray(job.pages) || !job.pages.length) return false;
+  const data = await apiJson("/api/workflow/jobs/restore", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job }),
+  });
+  state.workflowJobId = data.jobId || data.job?.id || job.id;
+  state.workflowJob = mergeWorkflowJobWithLocalImages(data.job, state.workflowJob || job);
+  ensureSelectedPage();
+  renderPagesWorkbench();
+  renderHistoryProjects();
+  saveState();
+  return true;
+}
+
+async function ensureWorkflowJobRegistered() {
+  if (!state.workflowJob?.pages?.length) return false;
+  if (!state.workflowJobId && state.workflowJob.id) {
+    state.workflowJobId = state.workflowJob.id;
+  }
+  if (!state.workflowJobId) return restoreWorkflowJobOnServer(state.workflowJob);
+  try {
+    const data = await apiJson(`/api/workflow/jobs/${encodeURIComponent(state.workflowJobId)}`);
+    state.workflowJob = mergeWorkflowJobWithLocalImages(data.job, state.workflowJob);
+    ensureSelectedPage();
+    saveState();
+    return true;
+  } catch (error) {
+    if (!isMissingWorkflowJobError(error)) throw error;
+    return restoreWorkflowJobOnServer(state.workflowJob);
+  }
+}
+
+async function ensureWorkflowJobRegisteredOrReport() {
+  try {
+    return await ensureWorkflowJobRegistered();
+  } catch (error) {
+    setStatus(error.message || "历史项目同步到生成服务失败。", "error");
+    return false;
+  }
+}
+
+async function restoreHistoryProject() {
   const projectId = state.selectedHistoryProjectId;
   const snapshot = state.workflowProjectSnapshots[projectId];
   if (!snapshot) {
@@ -1467,6 +1520,11 @@ function restoreHistoryProject() {
   renderPagesWorkbench();
   setStatus(`已恢复项目：${buildProjectTitle(state.workflowJob || { pages: [] })}`, "success");
   saveState();
+  try {
+    await restoreWorkflowJobOnServer(state.workflowJob);
+  } catch (error) {
+    setStatus(error.message || "项目已恢复到工作台，但同步到生成服务失败。", "error");
+  }
 }
 
 function collectHistoryImagesFromSummary(page, snapshot) {
@@ -1732,10 +1790,17 @@ function getAspectMeta() {
 
 function getPageImageCandidates(page) {
   if (!page) return [];
-  return Array.from(new Set([
+  const images = Array.from(new Set([
     page.baseImage,
     ...(Array.isArray(page.resultImages) ? page.resultImages : []),
   ].filter(Boolean)));
+  if (!page.baseImage && images[0]) {
+    page.baseImage = images[0];
+  }
+  if (images.length && (!Array.isArray(page.resultImages) || page.resultImages.length !== images.length)) {
+    page.resultImages = images;
+  }
+  return images;
 }
 
 function renderArtboard() {
@@ -1747,12 +1812,15 @@ function renderArtboard() {
     el.slideBaseImage.hidden = true;
     el.slideBaseImage.src = "";
     el.slideBaseImage.dataset.renderKey = "";
+    el.slideEmptyState.textContent = SLIDE_EMPTY_DEFAULT_TEXT;
     el.slideEmptyState.hidden = false;
     el.overlayLayer.innerHTML = "";
     renderPageDrawingLayer();
     return;
   }
   const hasVisualContent = Boolean(baseImage || draft?.drawingLayer || draft?.overlays?.length);
+  el.slideEmptyState.textContent = SLIDE_EMPTY_DEFAULT_TEXT;
+  el.slideEmptyState.hidden = hasVisualContent;
   if (baseImage) {
     if (!page.baseImage) page.baseImage = baseImage;
     const renderKey = `${page.id}:${imageCandidates.join("|")}`;
@@ -1763,6 +1831,7 @@ function renderArtboard() {
       if (!src) {
         el.slideBaseImage.hidden = true;
         el.slideBaseImage.src = "";
+        el.slideEmptyState.textContent = SLIDE_IMAGE_BROKEN_TEXT;
         el.slideEmptyState.hidden = false;
         return;
       }
@@ -1770,13 +1839,18 @@ function renderArtboard() {
         if (el.slideBaseImage.dataset.renderKey !== renderKey) return;
         page.baseImage = src;
         el.slideBaseImage.hidden = false;
+        el.slideEmptyState.textContent = SLIDE_EMPTY_DEFAULT_TEXT;
         el.slideEmptyState.hidden = true;
       };
       el.slideBaseImage.onerror = () => tryImage(index + 1);
       if (el.slideBaseImage.src !== src) {
         el.slideBaseImage.src = src;
-      } else if (el.slideBaseImage.complete && el.slideBaseImage.naturalWidth > 0) {
-        el.slideBaseImage.onload();
+      } else if (el.slideBaseImage.complete) {
+        if (el.slideBaseImage.naturalWidth > 0) {
+          el.slideBaseImage.onload();
+        } else {
+          tryImage(index + 1);
+        }
       }
     };
     tryImage(0);
@@ -1785,7 +1859,6 @@ function renderArtboard() {
     el.slideBaseImage.src = "";
     el.slideBaseImage.dataset.renderKey = "";
   }
-  el.slideEmptyState.hidden = hasVisualContent;
 
   const overlays = draft?.overlays || [];
   renderPageDrawingLayer();
@@ -2110,7 +2183,11 @@ async function apiJson(url, options = {}) {
   const response = await fetch(url, options);
   const data = await response.json();
   if (!response.ok || data.code) {
-    throw new Error(data.message || "请求失败。");
+    const error = new Error(data.message || "请求失败。");
+    error.code = data.code || "";
+    error.status = response.status;
+    error.data = data;
+    throw error;
   }
   return data;
 }
@@ -2586,6 +2663,7 @@ async function confirmTheme() {
   state.themeConfirmed = true;
   if (state.workflowJobId && state.workflowJob) {
     try {
+      await ensureWorkflowJobRegistered();
       const data = await apiJson("/api/workflow/theme/apply", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3192,6 +3270,7 @@ async function addManualPage() {
     setStatus("请先创建项目。", "error");
     return;
   }
+  if (!(await ensureWorkflowJobRegisteredOrReport())) return;
   const signal = startCancelableAction("addPage", el.addManualPageBtn, null, "添加中...");
   try {
     const data = await apiJson("/api/workflow/manual-page", {
@@ -3320,8 +3399,17 @@ function startWorkflowPolling() {
     } catch (error) {
       stopWorkflowPolling();
       if (isMissingWorkflowJobError(error)) {
-        clearWorkflowSession({ toSplit: true });
-        setStatus("之前的拆分任务已失效，请重新拆分。", "error");
+        if (state.workflowJob?.pages?.length) {
+          try {
+            await restoreWorkflowJobOnServer(state.workflowJob);
+            setStatus("历史项目已恢复，可继续生成。", "success");
+          } catch (restoreError) {
+            setStatus(restoreError.message || "历史项目恢复到生成服务失败。", "error");
+          }
+        } else {
+          clearWorkflowSession({ toSplit: true });
+          setStatus("之前的拆分任务已失效，请重新拆分。", "error");
+        }
         return;
       }
       setStatus(error.message || "读取任务进度失败。", "error");
@@ -3340,8 +3428,17 @@ async function syncWorkflowJobOnce() {
     saveState();
   } catch (error) {
     if (isMissingWorkflowJobError(error)) {
-      clearWorkflowSession({ toSplit: true });
-      setStatus("之前的拆分任务已失效，请重新拆分。", "error");
+      if (state.workflowJob?.pages?.length) {
+        try {
+          await restoreWorkflowJobOnServer(state.workflowJob);
+          setStatus("历史项目已恢复，可继续生成。", "success");
+        } catch (restoreError) {
+          setStatus(restoreError.message || "历史项目恢复到生成服务失败。", "error");
+        }
+      } else {
+        clearWorkflowSession({ toSplit: true });
+        setStatus("之前的拆分任务已失效，请重新拆分。", "error");
+      }
     }
   }
 }
@@ -3409,6 +3506,7 @@ async function batchGenerateReadyPagesLegacy() {
     return;
   }
 
+  if (!(await ensureWorkflowJobRegisteredOrReport())) return;
   const candidates = job.pages.filter((page) => page.readyToGenerate && !page.generated);
   if (!candidates.length) {
     setStatus("还没有可直接批量生成的页面。", "error");
@@ -3532,6 +3630,7 @@ async function batchGenerateReadyPages() {
     return;
   }
 
+  if (!(await ensureWorkflowJobRegisteredOrReport())) return;
   const candidates = job.pages.filter((page) => page.readyToGenerate && !page.generated);
   if (!candidates.length) {
     setStatus("还没有可直接批量生成的页面。", "error");
@@ -4083,6 +4182,7 @@ async function submitCurrentPageReprepare(options = {}) {
     setStatus("\u8bf7\u5148\u586b\u5199\u5f53\u524d\u9875\u7684\u6807\u9898\u6216\u6b63\u6587\u3002", "error");
     return;
   }
+  if (!(await ensureWorkflowJobRegisteredOrReport())) return;
   const actionKey = autoExpandToMaxChars ? "repolish" : "reprepare";
   const actionButton = autoExpandToMaxChars ? el.aiRepolishPageBtn : el.repreparePageBtn;
   const signal = startCancelableAction(actionKey, actionButton, el.cancelRepreparePageBtn, autoExpandToMaxChars ? "重润中..." : "\u6574\u7406\u4e2d...");
@@ -4152,6 +4252,7 @@ async function copyCurrentPagePrompt() {
   const draft = ensurePageDraft(page);
   applyDraftPromptForGeneration(draft, getCurrentSharedPromptValue());
   draft.onscreenContent = updateCurrentPageDraftFromEditors();
+  if (!(await ensureWorkflowJobRegisteredOrReport())) return;
   const promptTrace = page.promptTrace?.finalImage || null;
   const pageContent = String(page.onscreenContentText || page.onscreenContent || page.pageContent || "").trim();
   const promptIsCurrent = Boolean(promptTrace?.prompt)
@@ -4241,6 +4342,7 @@ async function generateCurrentPage() {
     return;
   }
 
+  if (!(await ensureWorkflowJobRegisteredOrReport())) return;
   const draft = ensurePageDraft(page);
   applyDraftPromptForGeneration(draft, getCurrentSharedPromptValue());
   draft.onscreenContent = updateCurrentPageDraftFromEditors();
@@ -4338,6 +4440,7 @@ async function modifyCurrentPage() {
     return;
   }
 
+  if (!(await ensureWorkflowJobRegisteredOrReport())) return;
   const requestKey = getPageGenerateRequestKey(page.id);
   const signal = startCancelableAction(requestKey, el.modifyCurrentPageBtn, el.cancelGenerateCurrentPageBtn, "修改中...");
   page.generationStatus = "running";

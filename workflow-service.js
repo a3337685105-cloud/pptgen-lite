@@ -1072,13 +1072,18 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
   }
 
   function publicJobSnapshot(job) {
-    const publicPages = job.pages.map((page) => ({
-      ...page,
-      baseImage: String(page.baseImage || "").startsWith("data:") ? "" : page.baseImage,
-      resultImages: Array.isArray(page.resultImages)
-        ? page.resultImages.filter((item) => !String(item || "").startsWith("data:"))
-        : [],
-    }));
+    const publicPages = job.pages.map((page) => {
+      const baseImage = String(page.baseImage || "").startsWith("data:") ? "" : String(page.baseImage || "");
+      const resultImages = Array.from(new Set([
+        baseImage,
+        ...(Array.isArray(page.resultImages) ? page.resultImages : []),
+      ].filter((item) => item && !String(item || "").startsWith("data:"))));
+      return {
+        ...page,
+        baseImage: baseImage || resultImages[0] || "",
+        resultImages,
+      };
+    });
     return {
       id: job.id,
       status: job.status,
@@ -1101,6 +1106,83 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
       pages: publicPages,
       errors: job.errors,
     };
+  }
+
+  function reviveWorkflowPage(rawPage = {}, index = 0) {
+    const pageNumber = Number(rawPage.pageNumber || rawPage.page_number || index + 1);
+    const raw = {
+      id: String(rawPage.id || "").trim() || crypto.randomUUID(),
+      pageNumber,
+      pageType: normalizePageType(rawPage.pageType || rawPage.page_type, index),
+      pageTitle: stringifyStructuredField(rawPage.pageTitle || rawPage.page_title || `Page ${pageNumber}`),
+      pageContent: stringifyStructuredField(rawPage.pageContent || rawPage.page_content || rawPage.onscreenContentText || rawPage.onscreenContent || ""),
+      sectionTopic: stringifyStructuredField(rawPage.sectionTopic || rawPage.section_topic || ""),
+      estimatedChars: Number(rawPage.estimatedChars || rawPage.estimated_chars || countCharacters(rawPage.pageContent || rawPage.onscreenContentText || rawPage.onscreenContent || "")),
+      splitRisk: normalizeSplitRisk(rawPage.splitRisk || rawPage.split_risk, rawPage.estimatedChars || rawPage.pageContent || ""),
+      recommendedBand: normalizeContentBand(rawPage.recommendedBand || rawPage.recommended_band, rawPage.pageContent || rawPage.onscreenContentText || rawPage.onscreenContent || ""),
+      decorationLevel: normalizeDecorationLevel(rawPage.decorationLevel),
+    };
+    const page = Object.assign(createWorkflowPage(raw), rawPage, raw);
+    const onscreenContent = normalizeOnscreenContent(page.onscreenContentText || page.onscreenContent || page.pageContent || page.pageTitle || "");
+    page.onscreenContent = onscreenContent;
+    page.onscreenContentText = onscreenContent;
+    page.pageContent = page.pageContent || onscreenContent;
+    page.splitDone = page.splitDone !== false;
+    page.prepareDone = page.prepareDone !== false && Boolean(page.prepareDone || onscreenContent || page.pageContent);
+    page.readyToGenerate = page.readyToGenerate !== false && Boolean(page.readyToGenerate || page.prepareDone);
+    page.generated = Boolean(page.generated || page.baseImage || (Array.isArray(page.resultImages) && page.resultImages.length));
+    page.generationStatus = page.generationStatus === "running"
+      ? (page.generated ? "done" : "idle")
+      : String(page.generationStatus || (page.generated ? "done" : "idle"));
+    page.generationError = String(page.generationError || "");
+    page.visualElementsPrompt = String(page.visualElementsPrompt || "");
+    page.visualElementsDisplay = String(page.visualElementsDisplay || page.visualElementsPrompt || "");
+    page.contentBand = normalizeContentBand(page.contentBand || page.recommendedBand, onscreenContent);
+    page.layoutMapping = page.layoutMapping || deriveLayoutMapping(page, onscreenContent);
+    page.layoutInstruction = page.layoutInstruction || page.layoutMapping?.instruction || "";
+    page.qualityResult = page.qualityResult || buildEmptyQualityResult();
+    page.promptTrace = page.promptTrace && typeof page.promptTrace === "object" ? page.promptTrace : {};
+    page.resultImages = Array.isArray(page.resultImages) ? Array.from(new Set(page.resultImages.filter(Boolean))) : [];
+    if (page.baseImage && !page.resultImages.includes(page.baseImage)) page.resultImages.unshift(page.baseImage);
+    if (!page.baseImage && page.resultImages[0]) page.baseImage = page.resultImages[0];
+    page.riskLevel = deriveRiskLevel(page);
+    page.riskReason = deriveRiskReason(page);
+    return page;
+  }
+
+  function reviveWorkflowJob(rawJob = {}) {
+    if (!rawJob || typeof rawJob !== "object" || !Array.isArray(rawJob.pages) || !rawJob.pages.length) {
+      const error = new Error("历史项目缺少可恢复的页面数据。");
+      error.status = 400;
+      throw error;
+    }
+    const pages = rawJob.pages.map((page, index) => reviveWorkflowPage(page, index));
+    const job = {
+      id: String(rawJob.id || rawJob.jobId || "").trim() || crypto.randomUUID(),
+      createdAt: rawJob.createdAt || new Date().toISOString(),
+      updatedAt: rawJob.updatedAt || new Date().toISOString(),
+      status: rawJob.status || "ready",
+      userStage: rawJob.userStage || "pages",
+      statusText: rawJob.statusText || "历史项目已恢复，可继续生成。",
+      totalPages: pages.length,
+      preparedPages: Number(rawJob.preparedPages || 0),
+      failedPages: Number(rawJob.failedPages || 0),
+      readyToGeneratePages: Number(rawJob.readyToGeneratePages || 0),
+      currentPageNumber: Number(rawJob.currentPageNumber || 0),
+      documentSummary: rawJob.documentSummary || "",
+      splitDiagnostics: rawJob.splitDiagnostics || "",
+      referenceDigest: rawJob.referenceDigest || null,
+      themeDefinition: rawJob.themeDefinition || null,
+      preferences: normalizePreferences(rawJob.preferences || {}),
+      aiProcessingMode: normalizeAiProcessingMode(rawJob.aiProcessingMode),
+      splitPreset: rawJob.splitPreset || "",
+      promptTrace: rawJob.promptTrace && typeof rawJob.promptTrace === "object" ? rawJob.promptTrace : {},
+      pages,
+      errors: Array.isArray(rawJob.errors) ? rawJob.errors : [],
+    };
+    workflowJobs.set(job.id, job);
+    refreshJobProgress(job);
+    return job;
   }
 
   function deriveRiskLevel(page) {
@@ -2025,6 +2107,22 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
       return res.status(error.status || 500).json({
         code: "WorkflowJobNotFound",
         message: error.message || "读取工作流任务失败。",
+      });
+    }
+  });
+
+  app.post("/api/workflow/jobs/restore", (req, res) => {
+    try {
+      const job = reviveWorkflowJob(req.body?.job || req.body?.workflowJob);
+      return res.json({
+        ok: true,
+        jobId: job.id,
+        job: publicJobSnapshot(job),
+      });
+    } catch (error) {
+      return res.status(error.status || 500).json({
+        code: "WorkflowJobRestoreFailed",
+        message: error.message || "恢复历史项目失败。",
       });
     }
   });
