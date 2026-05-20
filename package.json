@@ -1,8 +1,8 @@
 {
   "name": "pptgen-studio-lite",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "productName": "PPTGEN Studio",
-  "description": "AI PPT Generator - Smart slide creation tool",
+  "description": "Local AI PPT image-slide generator with Grsai GPT Image 2 VIP workflow",
   "main": "electron-main.js",
   "bin": "server.js",
   "scripts": {

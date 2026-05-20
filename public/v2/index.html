@@ -81,7 +81,7 @@
             <div class="smart-stage-shell">
               <!-- 隐藏的模型选择器，保持 JS 兼容 -->
               <select id="workflowImageModelEntry" class="sr-only" aria-label="最终生图模型" hidden>
-                <option value="gpt-image-2">GPT Image 2</option>
+                <option value="gpt-image-2-vip">GPT Image 2 VIP</option>
               </select>
               <div id="workflowModelHint" hidden></div>
               <button id="confirmWorkflowModelBtn" hidden></button>
@@ -118,11 +118,11 @@
                       </label>
                       <label class="field" id="quickOpenAiImageKeyField">
                         <span>GPT API Key</span>
-                        <input id="quickOpenAiImageApiKey" type="password" placeholder="用于 gpt-image-2" />
+                        <input id="quickOpenAiImageApiKey" type="password" placeholder="用于 gpt-image-2-vip" />
                       </label>
                       <label class="field" id="quickOpenAiImageBaseUrlField">
                         <span>GPT Host / Endpoint</span>
-                        <input id="quickOpenAiImageBaseUrl" type="text" placeholder="https://api.bltcy.ai, https://backup-host" />
+                        <input id="quickOpenAiImageBaseUrl" type="text" placeholder="https://grsai.dakka.com.cn/v1/api/generate" />
                       </label>
                       <button class="btn secondary" type="button" id="quickTestApiKeyBtn">测试 Key</button>
                     </div>
@@ -165,6 +165,25 @@
                       <span>txt / docx / pptx / xlsx / pdf / image</span>
                     </div>
                     <div class="file-list" id="referenceFilesList"></div>
+                    <div class="extracted-import-panel">
+                      <div>
+                        <strong>导入逐页提取稿</strong>
+                        <span>用于老师旧 PPT 翻新：一页对应一页，跳过 LLM 拆分。</span>
+                      </div>
+                      <label class="field">
+                        <span>导入模式</span>
+                        <select id="extractedImportMode">
+                          <option value="plain">只导入标题和正文</option>
+                          <option value="with_constraints">带校对点和补充约束</option>
+                        </select>
+                      </label>
+                      <div class="upload-zone compact-upload-zone">
+                        <button class="btn secondary" type="button" id="pickExtractedImportBtn">选择提取稿文件</button>
+                        <input id="extractedImportInput" type="file" accept=".md,.txt,.json,.pptx" hidden />
+                        <span>md / txt / json</span>
+                      </div>
+                      <div class="inline-hint" id="extractedImportHint">支持 Markdown/JSON 提取稿；默认只读取“标题/正文”，不额外注入画图要求或校对提示。</div>
+                    </div>
                     <div class="stage-footer">
                       <button class="btn ghost" type="button" id="backToThemeBtn" hidden>上一步</button>
                       <div class="action-group">
@@ -219,9 +238,13 @@
                     </div>
                     <div class="artboard-workspace">
                       <div class="artboard-toolbar">
+                        <button class="btn ghost" type="button" id="uploadPageReferenceBtn">上传原页参考</button>
+                        <input id="pageReferenceInput" type="file" accept="image/*" multiple hidden />
+                        <button class="btn ghost" type="button" id="clearPageReferenceBtn">清空参考</button>
                         <button class="btn ghost" type="button" id="uploadOverlayBtn">上传补充图片</button>
                         <input id="overlayFileInput" type="file" accept="image/*" multiple hidden />
                         <button class="btn ghost" type="button" id="clearOverlayBtn">清空叠加</button>
+                        <div class="page-reference-strip" id="pageReferenceStrip"></div>
                       </div>
                       <div class="slide-frame" id="slideFrame">
                         <div class="slide-stage" id="slideStage">
@@ -381,17 +404,17 @@
                   <label class="field" hidden>
                     <span>最终生图模型</span>
                     <select id="workflowImageModel">
-                      <option value="gpt-image-2">GPT Image 2</option>
+                      <option value="gpt-image-2-vip">GPT Image 2 VIP</option>
                     </select>
                   </label>
-                  <label class="field">
+                  <label class="field" id="openAiImageKeyField">
                     <span>GPT API Key</span>
-                    <input id="openAiImageApiKey" type="password" placeholder="用于 gpt-image-2" />
+                    <input id="openAiImageApiKey" type="password" placeholder="用于 gpt-image-2-vip" />
                   </label>
-                  <label class="field">
+                  <label class="field" id="openAiImageBaseUrlField">
                     <span>GPT Host / Endpoint</span>
-                    <input id="openAiImageBaseUrl" type="text" placeholder="https://api.bltcy.ai, https://your-backup-host" />
-                    <span class="field-hint" style="font-size: 12px; color: #94a3b8; margin-top: 2px; display: block;">注意：OpenAI 官方 API 在中国大陆可能无法直接访问，建议使用中转代理地址</span>
+                    <input id="openAiImageBaseUrl" type="text" placeholder="https://grsai.dakka.com.cn/v1/api/generate" />
+                    <span class="field-hint" style="font-size: 12px; color: #94a3b8; margin-top: 2px; display: block;">默认使用 Grsai /v1/api/generate；也可填 https://grsaiapi.com，系统会自动补齐当前接口路径。</span>
                   </label>
                   <label class="field">
                     <span>神马中转 API Key</span>
@@ -453,6 +476,26 @@
         </div>
       </div>
     </div>
-    <script src="/v2/app.js?v=20260502-workflow-restore2"></script>
+    <div class="image-modal reference-crop-modal" id="referenceCropModal" hidden>
+      <div class="image-modal-backdrop" data-close-reference-crop-modal></div>
+      <div class="image-modal-dialog reference-crop-dialog" role="dialog" aria-modal="true" aria-labelledby="referenceCropTitle">
+        <div class="image-modal-header">
+          <strong id="referenceCropTitle">截取参考区域</strong>
+          <div class="image-modal-actions">
+            <button class="btn secondary" type="button" id="referenceCropSaveNewBtn">新增选区参考</button>
+            <button class="btn secondary" type="button" id="referenceCropReplaceBtn">替换原图</button>
+            <button class="icon-btn" type="button" id="referenceCropCloseBtn" aria-label="关闭选区">×</button>
+          </div>
+        </div>
+        <div class="reference-crop-hint">拖拽框选想让模型参考的局部区域；建议只截结构、公式或关键图，不要整页都喂给生图模型。</div>
+        <div class="image-modal-body reference-crop-body">
+          <div class="reference-crop-stage" id="referenceCropStage">
+            <img id="referenceCropImage" alt="参考图选区" />
+            <div class="reference-crop-box" id="referenceCropBox" hidden></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script src="/v2/app.js?v=20260517-reference-crop"></script>
   </body>
 </html>

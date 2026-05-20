@@ -2,9 +2,10 @@ const crypto = require("crypto");
 
 const WORKFLOW_ASSISTANT_MODEL = "qwen3.6-plus";
 const DEFAULT_LIGHTWEIGHT_ASSISTANT_MODEL = "qwen-turbo-latest";
-const WORKFLOW_IMAGE_MODEL = "gpt-image-2";
+const WORKFLOW_IMAGE_MODEL = "gpt-image-2-vip";
 const OPENAI_WORKFLOW_IMAGE_MODELS = new Set([
   "gpt-image-2",
+  "gpt-image-2-vip",
 ]);
 const DEFAULT_REGION = "beijing";
 const DEFAULT_DECORATION_LEVEL = "medium";
@@ -280,7 +281,7 @@ function installWorkflowRoutes(app, deps) {
     requestJsonViaFetch,
     requestOpenAiImageGenerate,
     resolveDashScopeApiKey = (value) => String(value || process.env.DASHSCOPE_API_KEY || process.env.QWEN_API_KEY || "").trim(),
-    resolveOpenAiImageApiKey = (value) => String(value || process.env.OPENAI_IMAGE_API_KEY || process.env.OPENAI_API_KEY || "").trim(),
+    resolveOpenAiImageApiKey = (value) => String(value || process.env.OPENAI_IMAGE_API_KEY || process.env.OPENAI_API_KEY || process.env.GRSAI_API_KEY || process.env.GRSAI_IMAGE_API_KEY || "").trim(),
     resolveWhatAiImageApiKey = (value) => String(value || process.env.WHATAI_IMAGE_API_KEY || process.env.WHATAI_API_KEY || "").trim(),
     parseDataUrl,
     loadReferenceAssetAsDataUrl,
@@ -894,6 +895,309 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
         };
       })
       .filter((page) => page.pageTitle || page.pageContent);
+  }
+
+  function normalizeExtractedImportMode(value) {
+    const normalized = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+    if (["plain", "text_only", "no_constraints"].includes(normalized)) return "plain";
+    return "with_constraints";
+  }
+
+  function pickStructuredField(item, keys) {
+    for (const key of keys) {
+      const value = item?.[key];
+      const text = stringifyStructuredField(value);
+      if (text) return text;
+    }
+    return "";
+  }
+
+  function pickStructuredImageList(item, keys) {
+    const values = [];
+    const appendValue = (value) => {
+      const src = typeof value === "string"
+        ? value
+        : (value?.src || value?.url || value?.image || value?.dataUrl || value?.data_url || "");
+      const text = stringifyStructuredField(src).trim();
+      if (text) values.push(text);
+    };
+    for (const key of keys) {
+      const value = item?.[key];
+      if (Array.isArray(value)) {
+        value.forEach(appendValue);
+        continue;
+      }
+      appendValue(value);
+    }
+    return normalizeWorkflowReferenceImages(values);
+  }
+
+  function buildPublicImageErrorDetails(error) {
+    return {
+      provider: error?.provider || "",
+      endpoint: error?.endpoint || "",
+      status: error?.status || "",
+      model: error?.model || "",
+      upstreamCode: error?.upstreamCode || "",
+      upstreamRequestId: error?.upstreamRequestId || "",
+    };
+  }
+
+  function parseStructuredExtractionText(structuredText = "") {
+    const source = String(structuredText || "").replace(/\r/g, "").trim();
+    if (!source) return [];
+    const sections = [];
+    const pattern = /^##\s*Slide\s*(\d+)\s*$/gim;
+    const matches = [...source.matchAll(pattern)];
+    const fieldLabels = [
+      "标题",
+      "AI提示词",
+      "页面提示词",
+      "生成提示词",
+      "提交提示词",
+      "提交给AI的提示词",
+      "Prompt",
+      "页面解读",
+      "页面理解",
+      "讲解内容",
+      "上屏文本",
+      "正文",
+      "原文文本",
+      "OCR文本",
+      "画图要求",
+      "视觉要求",
+      "高风险校对点",
+      "校对点",
+    ];
+    const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const allFieldPattern = `(?:${fieldLabels.map(escapeRegex).join("|")})`;
+    matches.forEach((match, index) => {
+      const start = match.index + match[0].length;
+      const end = index + 1 < matches.length ? matches[index + 1].index : source.length;
+      const block = source.slice(start, end).trim();
+      const pageNumber = Number(match[1] || index + 1);
+      const promptLabelPattern = `(?:AI提示词|页面提示词|生成提示词|提交提示词|提交给AI的提示词|Prompt)`;
+      const promptLabelMatch = block.match(new RegExp(`(?:^|\\n)${promptLabelPattern}[：:]\\s*`, "i"));
+      const topLevelBlock = promptLabelMatch ? block.slice(0, promptLabelMatch.index).trim() : block;
+      const readField = (label, fieldSource = topLevelBlock) => {
+        const regex = new RegExp(`(?:^|\\n)${escapeRegex(label)}[：:]\\s*([\\s\\S]*?)(?=\\n${allFieldPattern}[：:]|\\n##\\s*Slide\\s*\\d+\\s*$|$)`, "i");
+        const found = String(fieldSource || "").match(regex);
+        return stringifyStructuredField(found?.[1] || "");
+      };
+      const readPromptField = (labels) => {
+        for (const label of labels) {
+          const regex = new RegExp(`(?:^|\\n)${escapeRegex(label)}[：:]\\s*([\\s\\S]*)$`, "i");
+          const found = block.match(regex);
+          const text = stringifyStructuredField(found?.[1] || "");
+          if (text) return text;
+        }
+        return "";
+      };
+      const readFirstField = (labels) => {
+        for (const label of labels) {
+          const text = readField(label);
+          if (text) return text;
+        }
+        return "";
+      };
+      const pageTitle = readFirstField(["标题"]);
+      const aiPrompt = readPromptField(["AI提示词", "页面提示词", "生成提示词", "提交提示词", "提交给AI的提示词", "Prompt"]);
+      const semanticText = readFirstField(["页面解读", "页面理解", "讲解内容"]);
+      const onscreenText = readFirstField(["上屏文本", "正文"]);
+      const originalText = readFirstField(["原文文本", "OCR文本"]);
+      const visualPrompt = readFirstField(["画图要求", "视觉要求"]);
+      const riskNotes = readFirstField(["高风险校对点", "校对点"]);
+      sections.push({
+        pageNumber,
+        pageTitle,
+        aiPrompt,
+        semanticText,
+        onscreenText,
+        originalText,
+        visualPrompt,
+        riskNotes,
+      });
+    });
+    return sections;
+  }
+
+  function inferImportedPageType(item, index) {
+    const explicit = normalizePageType(item?.pageType || item?.page_type, index);
+    if (item?.pageType || item?.page_type) return explicit;
+    const title = stringifyStructuredField(item?.pageTitle || item?.page_title || item?.title || "");
+    if (index === 0) return "cover";
+    if (/目录|提纲|agenda|contents/i.test(title)) return "catalog";
+    if (/思考题|练习|判断|quiz|exercise/i.test(title)) return "content";
+    if (/^第[一二三四五六七八九十\d]+[章节讲]/.test(title)) return "chapter";
+    return "content";
+  }
+
+  function buildImportedPagePrompt(item, importMode) {
+    const aiPrompt = pickStructuredField(item, ["aiPrompt", "ai_prompt", "pagePrompt", "page_prompt", "generationPrompt", "generation_prompt", "submitPrompt", "submit_prompt", "AI提示词", "页面提示词", "生成提示词", "提交提示词", "提交给AI的提示词", "Prompt"]);
+    if (aiPrompt) return aiPrompt;
+    if (importMode === "plain") return "";
+    const semanticText = pickStructuredField(item, ["semanticText", "semantic_text", "pageExplanation", "page_explanation", "lectureNotes", "lecture_notes", "页面解读", "页面理解", "讲解内容"]);
+    const onscreenText = pickStructuredField(item, ["onscreenText", "onscreen_text", "displayText", "display_text", "上屏文本", "正文"]);
+    const originalText = pickStructuredField(item, ["originalText", "original_text", "ocrText", "ocr_text", "rawText", "raw_text", "原文文本", "OCR文本"]);
+    const visualPrompt = pickStructuredField(item, ["visualPrompt", "visual_prompt", "drawingPrompt", "drawing_prompt", "画图要求"]);
+    const riskNotes = pickStructuredField(item, ["riskNotes", "risk_notes", "constraints", "highRiskNotes", "高风险校对点"]);
+    const criticalTerms = pickStructuredField(item, ["criticalTerms", "critical_terms", "lockedTerms", "locked_terms", "terms"]);
+    return [
+      onscreenText ? `上屏文本：${onscreenText}` : "",
+      semanticText ? `页面解读：${semanticText}` : "",
+      originalText ? `原始图中文字/标注（只作校对，不要逐行搬到正文）：${originalText}` : "",
+      visualPrompt ? `画图要求：${visualPrompt}` : "",
+      riskNotes ? `高风险校对点：${riskNotes}` : "",
+      criticalTerms ? `必须准确保留的术语/符号：${criticalTerms}` : "",
+      "生成页面时以上屏文本为正文边界；原始图中文字主要用于图中标注和校对，不要把零散标注堆成正文。",
+      "不要擅自改写材料学术语、公式、晶面指数、晶向指数和数字；如果符号不确定，宁可用更清晰的图示表达，避免编造。",
+    ].filter(Boolean).join("\n");
+  }
+
+  function extractPromptField(prompt, labels, stopLabels = []) {
+    const source = String(prompt || "").replace(/\r/g, "").trim();
+    if (!source) return "";
+    const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const allStops = Array.from(new Set([...labels, ...stopLabels])).map(escapeRegex).join("|");
+    for (const label of labels) {
+      const regex = new RegExp(`(?:^|\\n|[。；;]\\s*)${escapeRegex(label)}[：:]\\s*([\\s\\S]*?)(?=(?:\\n|[。；;]\\s*)(?:${allStops})[：:]|$)`, "i");
+      const match = source.match(regex);
+      const text = stringifyStructuredField(match?.[1] || "");
+      if (text) return text;
+    }
+    return "";
+  }
+
+  function extractTitleFromPrompt(prompt) {
+    const title = extractPromptField(prompt, ["标题", "PPT标题", "页面标题"], [
+      "上屏内容",
+      "上屏文本",
+      "正文",
+      "页面要点",
+      "图像要求",
+      "图示要求",
+      "示意图要求",
+      "画图要求",
+      "技术图要求",
+      "科研绘图结构要求",
+      "绘图结构要求",
+      "结构准确性要求",
+      "几何约束",
+      "准确性禁忌",
+      "校对要求",
+      "禁止",
+    ]);
+    return title.split(/\n+/)[0]?.trim() || "";
+  }
+
+  function extractOnscreenTextFromPrompt(prompt) {
+    return extractPromptField(prompt, ["上屏内容", "上屏文本", "正文", "页面要点"], [
+      "标题",
+      "PPT标题",
+      "页面标题",
+      "图像要求",
+      "图示要求",
+      "示意图要求",
+      "画图要求",
+      "技术图要求",
+      "科研绘图结构要求",
+      "绘图结构要求",
+      "结构准确性要求",
+      "几何约束",
+      "准确性禁忌",
+      "校对要求",
+      "禁止",
+    ]);
+  }
+
+  function isProbablyFigureLabel(line) {
+    const normalized = String(line || "").replace(/\s+/g, "").trim();
+    if (!normalized) return true;
+    if (/^[A-Za-z]{1,5}$/.test(normalized)) return true;
+    if (/^[\d+\-*/×=().{}<>\[\],，。:：;；/\\]+$/.test(normalized)) return true;
+    if (normalized.length <= 5 && /[{}<>()[\]=+\-*/×]/.test(normalized)) return true;
+    if (normalized.length <= 3 && /^[A-Za-z0-9]+$/.test(normalized)) return true;
+    return false;
+  }
+
+  function deriveOnscreenTextFromOriginal(originalText, pageTitle) {
+    const titleKey = String(pageTitle || "").replace(/\s+/g, "").trim().toLowerCase();
+    const lines = String(originalText || "")
+      .replace(/\r/g, "")
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => line.replace(/\s+/g, "").trim().toLowerCase() !== titleKey);
+    if (!lines.length) return "";
+
+    const readableLines = lines.filter((line) => !isProbablyFigureLabel(line));
+    const selected = readableLines.length ? readableLines : lines.slice(0, 6);
+    return selected.join("\n").trim();
+  }
+
+  function normalizeImportedExtractionPages(inputPages = [], options = {}) {
+    const importMode = normalizeExtractedImportMode(options.contentMode || options.importMode);
+    return (Array.isArray(inputPages) ? inputPages : [])
+      .map((item, index) => {
+        const aiPrompt = pickStructuredField(item, ["aiPrompt", "ai_prompt", "pagePrompt", "page_prompt", "generationPrompt", "generation_prompt", "submitPrompt", "submit_prompt", "AI提示词", "页面提示词", "生成提示词", "提交提示词", "提交给AI的提示词", "Prompt"]);
+        const semanticText = pickStructuredField(item, ["semanticText", "semantic_text", "pageExplanation", "page_explanation", "lectureNotes", "lecture_notes", "页面解读", "页面理解", "讲解内容"]);
+        const onscreenText = pickStructuredField(item, ["onscreenText", "onscreen_text", "displayText", "display_text", "上屏文本", "正文"]);
+        const originalText = pickStructuredField(item, ["originalText", "original_text", "ocrText", "ocr_text", "rawText", "raw_text", "text", "原文文本", "OCR文本"]);
+        const legacyContent = pickStructuredField(item, ["pageContent", "page_content", "onscreenContent", "onscreen_content"]);
+        const pageTitle = pickStructuredField(item, ["pageTitle", "page_title", "title", "标题"])
+          || extractTitleFromPrompt(aiPrompt)
+          || `Slide ${Number(item?.pageNumber || item?.page_number || index + 1)}`;
+        const promptOnscreenText = extractOnscreenTextFromPrompt(aiPrompt);
+        const derivedOnscreenText = deriveOnscreenTextFromOriginal(originalText, pageTitle);
+        const pageContent = onscreenText || promptOnscreenText || semanticText || legacyContent || derivedOnscreenText || originalText || pageTitle;
+        const promptText = buildImportedPagePrompt(item, importMode);
+        const referenceImages = pickStructuredImageList(item, [
+          "referenceImages",
+          "reference_images",
+          "referenceImage",
+          "reference_image",
+          "slideImage",
+          "slide_image",
+          "sourceImage",
+          "source_image",
+          "originalSlideImage",
+          "original_slide_image",
+          "原页截图",
+          "原始页截图",
+          "参考图片",
+        ]);
+        const estimatedChars = Number(item?.estimatedChars || item?.estimated_chars || countCharacters(pageContent));
+        return {
+          rawPage: {
+            id: crypto.randomUUID(),
+            pageNumber: Number(item?.pageNumber || item?.page_number || index + 1),
+            pageType: inferImportedPageType({ ...item, pageTitle }, index),
+            pageTitle,
+            pageContent,
+            directImagePrompt: aiPrompt,
+            promptOnlyImport: Boolean(aiPrompt),
+            referenceImages,
+            sectionTopic: pickStructuredField(item, ["sectionTopic", "section_topic"]) || pageTitle,
+            estimatedChars,
+            splitRisk: normalizeSplitRisk(item?.splitRisk || item?.split_risk, estimatedChars),
+            recommendedBand: normalizeContentBand(item?.recommendedBand || item?.recommended_band, pageContent),
+            decorationLevel: normalizeDecorationLevel(item?.decorationLevel || options.decorationLevel),
+          },
+          promptText,
+          source: {
+            aiPrompt,
+            semanticText,
+            onscreenText,
+            derivedOnscreenText,
+            originalText,
+            visualPrompt: pickStructuredField(item, ["visualPrompt", "visual_prompt", "drawingPrompt", "drawing_prompt", "画图要求"]),
+            riskNotes: pickStructuredField(item, ["riskNotes", "risk_notes", "constraints", "highRiskNotes", "高风险校对点"]),
+            referenceImages,
+            importMode,
+          },
+        };
+      })
+      .filter((page) => page.rawPage.pageTitle || page.rawPage.pageContent);
   }
 
   function buildEmptyQualityResult() {
@@ -1783,6 +2087,13 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
   }
 
   function buildGptFinalImagePrompt(page, pageStylePrompt = "") {
+    if (page?.promptOnlyImport) {
+      const directImagePrompt = stringifyStructuredField(page?.directImagePrompt || "").trim();
+      const submittedPrompt = stringifyStructuredField(pageStylePrompt || "").trim();
+      if (!submittedPrompt) return directImagePrompt;
+      if (directImagePrompt && submittedPrompt.includes(directImagePrompt)) return directImagePrompt;
+      return submittedPrompt;
+    }
     const title = stringifyStructuredField(page?.pageTitle || "").trim() || "未命名页面";
     const cleanOnscreenContent = normalizeOnscreenContent(page?.onscreenContentText || page?.onscreenContent || page?.pageContent);
     const body = stripTitleFromOnscreenContent(title, cleanOnscreenContent) || cleanOnscreenContent || title;
@@ -1792,6 +2103,56 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
       style ? `可选风格提示词：\n${style}` : "",
       `内容：\n标题：${title}\n正文：${body}`,
     ].filter(Boolean).join("\n\n");
+  }
+
+  function buildReferenceDrivenImagePrompt(page) {
+    const title = stringifyStructuredField(page?.pageTitle || "").trim() || "未命名页面";
+    const cleanOnscreenContent = normalizeOnscreenContent(page?.onscreenContentText || page?.onscreenContent || page?.pageContent);
+    const body = stripTitleFromOnscreenContent(title, cleanOnscreenContent) || cleanOnscreenContent || title;
+    return [
+      `内容：\n标题：${title}\n正文：${body}`,
+      "本页采用参考图重绘模式：不要依赖长段文字描述重新想象科研图；参考图里的结构、箭头、符号、公式、标注和相互关系是主要依据。",
+    ].join("\n\n");
+  }
+
+  function normalizeWorkflowReferenceImages(value) {
+    const list = Array.isArray(value) ? value : (value ? [value] : []);
+    return list
+      .map((item) => {
+        const src = typeof item === "string"
+          ? item
+          : (item?.src || item?.url || item?.image || item?.dataUrl || item?.data_url || "");
+        return stringifyStructuredField(src).trim();
+      })
+      .filter((item) => /^data:image\//i.test(item) || /^https?:\/\//i.test(item) || item.startsWith("/reference-assets/"))
+      .slice(0, 3);
+  }
+
+  async function resolveWorkflowReferenceImagesForRequest(images = []) {
+    const normalized = normalizeWorkflowReferenceImages(images);
+    const resolved = await Promise.all(normalized.map(async (image) => {
+      if (image.startsWith("/reference-assets/") && typeof loadReferenceAssetAsDataUrl === "function") {
+        try {
+          return await loadReferenceAssetAsDataUrl({ previewUrl: image, mimeType: "image/png" });
+        } catch {
+          return "";
+        }
+      }
+      return image;
+    }));
+    return resolved.filter(Boolean).slice(0, 3);
+  }
+
+  function buildReferenceImageInstruction(referenceCount, hasCanvasImage = false) {
+    if (!referenceCount && !hasCanvasImage) return "";
+    const subjects = [];
+    if (referenceCount) subjects.push(`已附 ${referenceCount} 张原 PPT 页面参考图`);
+    if (hasCanvasImage) subjects.push("已附当前画布/手绘标记图");
+    return [
+      `${subjects.join("，")}。请把参考图作为科研结构、符号、公式、相对位置和图形拓扑的主要依据。`,
+      "目标是重绘并优化清晰度与可读性，不要凭空改变晶面、晶向、位错线、伯格斯矢量、层错区域或反应式。",
+      "如果文字提示与参考图冲突，以参考图中的科学结构为准，但可以提升线条、对齐、层级和视觉整洁度。",
+    ].join("\n");
   }
 
   function getConfirmedThemeBasicOrThrow(job) {
@@ -1988,6 +2349,118 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
       return res.status(error.status || 500).json({
         code: "WorkflowManualPageFailed",
         message: error.message || "添加页面失败。",
+      });
+    }
+  });
+
+  app.post("/api/workflow/import-extracted", async (req, res) => {
+    const {
+      projectTitle,
+      pages,
+      structuredText,
+      contentMode,
+      importMode,
+      themeDefinition,
+      preferences,
+      decorationLevel,
+    } = req.body || {};
+
+    try {
+      const parsedPages = Array.isArray(pages) && pages.length
+        ? pages
+        : parseStructuredExtractionText(structuredText);
+      const importedPages = normalizeImportedExtractionPages(parsedPages, {
+        contentMode,
+        importMode,
+        decorationLevel,
+      });
+
+      if (!importedPages.length) {
+        return res.status(400).json({
+          code: "MissingExtractedPages",
+          message: "请提供 pages 数组，或提供包含“## Slide 01 / 标题 / 页面解读 / 上屏文本 / 原文文本 / 画图要求”的 structuredText。",
+        });
+      }
+
+      const normalizedPreferences = normalizePreferences(preferences);
+      const title = stringifyStructuredField(projectTitle || themeDefinition?.themeName || "PPT 翻新导入");
+      const normalizedThemeDefinition = normalizeThemeBasicDefinition(
+        themeDefinition && Object.keys(themeDefinition || {}).length
+          ? themeDefinition
+          : {
+              themeName: title,
+              basic: [
+                "学术课件翻新，版式清晰克制，图解优先，避免花哨装饰。",
+                "按源 PPT 一页对应一页生成；保留原页核心文本，不擅自改写公式、晶面指数、晶向指数和数字。",
+                "复杂结构图要画成清晰教学示意，文字标签保持可读。",
+              ].join("\n"),
+            },
+        title,
+        decorationLevel,
+        normalizedPreferences,
+      );
+
+      const job = createWorkflowJob({
+        documentSummary: `${title}：已从提取稿导入 ${importedPages.length} 页。`,
+        splitDiagnostics: "跳过 LLM 拆分；逐页使用提取稿创建页面，后续生成仍走原图片生成链路。",
+        referenceDigest: null,
+        themeDefinition: normalizedThemeDefinition,
+        preferences: normalizedPreferences,
+        splitPreset: "extracted-slide-import",
+        aiProcessingMode: "strict",
+        pages: importedPages.map((item) => item.rawPage),
+        themeTrace: null,
+        referenceTrace: null,
+        splitTrace: {
+          source: "extracted-import",
+          contentMode: normalizeExtractedImportMode(contentMode || importMode),
+          pageCount: importedPages.length,
+        },
+        expansionTrace: {
+          mode: "extracted-import",
+          enableExpansion: false,
+          targetChars: 0,
+          maxChars: 0,
+        },
+      });
+
+      job.pages.forEach((page, index) => {
+        preparePageForGeneration(job, page, "extracted-import");
+        const imported = importedPages[index];
+        const promptText = imported?.promptText || "";
+        page.sharedPrompt = promptText;
+        page.extraPrompt = promptText;
+        page.pageStylePrompt = promptText;
+        page.promptTrace.extractedImport = {
+          importedAt: new Date().toISOString(),
+          mode: imported?.source?.importMode || normalizeExtractedImportMode(contentMode || importMode),
+          promptOnly: Boolean(imported?.source?.aiPrompt),
+          aiPrompt: imported?.source?.aiPrompt || "",
+          semanticText: imported?.source?.semanticText || "",
+          onscreenText: imported?.source?.onscreenText || "",
+          derivedOnscreenText: imported?.source?.derivedOnscreenText || "",
+          originalText: imported?.source?.originalText || "",
+          visualPrompt: imported?.source?.visualPrompt || "",
+          riskNotes: imported?.source?.riskNotes || "",
+          promptText,
+        };
+      });
+      refreshJobProgress(job);
+
+      return res.json({
+        ok: true,
+        jobId: job.id,
+        job: publicJobSnapshot(job),
+        importDiagnostics: {
+          pageCount: importedPages.length,
+          contentMode: normalizeExtractedImportMode(contentMode || importMode),
+          withPromptPages: importedPages.filter((item) => item.promptText).length,
+        },
+      });
+    } catch (error) {
+      return res.status(error.status || 500).json({
+        code: "WorkflowExtractedImportFailed",
+        message: error.message || "导入提取稿失败。",
       });
     }
   });
@@ -2228,6 +2701,7 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
       seed,
       extraPrompt,
       pageStylePrompt,
+      referenceImages,
       canvasImage,
       onscreenContent,
       promptMode,
@@ -2235,11 +2709,14 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
 
     const selectedImageModel = String(imageModel || WORKFLOW_IMAGE_MODEL).trim() || WORKFLOW_IMAGE_MODEL;
     const effectiveApiKey = resolveDashScopeApiKey(apiKey);
-    const effectiveOpenAiKey = resolveOpenAiImageApiKey(openAiImageApiKey);
+    const effectiveImageKey = resolveOpenAiImageApiKey(openAiImageApiKey);
     const effectiveWhatAiKey = resolveWhatAiImageApiKey(whatAiImageApiKey);
 
-    if (!effectiveOpenAiKey) {
-      return res.status(400).json({ code: "MissingOpenAiImageApiKey", message: "请先填写 OpenAI Image API Key。" });
+    if (!effectiveImageKey) {
+      return res.status(400).json({
+        code: "MissingOpenAiImageApiKey",
+        message: "Missing OpenAI Image API Key. Please fill OpenAI Image API Key.",
+      });
     }
 
     try {
@@ -2258,12 +2735,21 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
       page.generationError = "";
       page.generationStartedAt = new Date().toISOString();
       // 使用 GPT 简化 prompt
-      const finalPrompt = buildGptFinalImagePrompt(page, String(pageStylePrompt || "").trim());
+      const effectivePageStylePrompt = String(pageStylePrompt || page.pageStylePrompt || page.extraPrompt || "").trim();
+      const canUseCanvasImage = String(promptMode || "").trim() === "modify-only";
+      const parsedCanvasImage = canUseCanvasImage ? parseDataUrl(String(canvasImage || "").trim()) : null;
+      const attachedReferenceImages = normalizeWorkflowReferenceImages(referenceImages);
+      const requestReferenceImages = await resolveWorkflowReferenceImagesForRequest(attachedReferenceImages);
+      const referenceInstruction = buildReferenceImageInstruction(attachedReferenceImages.length, Boolean(parsedCanvasImage));
+      const baseFinalPrompt = attachedReferenceImages.length && page?.promptOnlyImport
+        ? buildReferenceDrivenImagePrompt(page)
+        : buildGptFinalImagePrompt(page, effectivePageStylePrompt);
+      const finalPrompt = [referenceInstruction, baseFinalPrompt].filter(Boolean).join("\n\n");
       page.jitDecoration = null;
       page.pageTypePromptModule = null;
       const finalPromptTrace = {
         promptMode: "gpt-simple",
-        pageStylePrompt: String(pageStylePrompt || "").trim(),
+        pageStylePrompt: effectivePageStylePrompt,
         basicIncluded: false,
         questionnaireAnchorIncluded: false,
         layoutMapping: null,
@@ -2277,17 +2763,19 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
         prompt: finalPrompt,
         extraPrompt: String(extraPrompt || "").trim(),
         ...finalPromptTrace,
-        hasCanvasImage: Boolean(String(promptMode || "").trim() === "modify-only" && parseDataUrl(String(canvasImage || "").trim())),
+        hasCanvasImage: Boolean(parsedCanvasImage),
+        referenceImageCount: attachedReferenceImages.length,
         searchMetadata: null,
       };
 
-      const canUseCanvasImage = String(promptMode || "").trim() === "modify-only";
-      const parsedCanvasImage = canUseCanvasImage ? parseDataUrl(String(canvasImage || "").trim()) : null;
       let responsePayload = null;
       let images = [];
 
       // GPT Image 生成
       const content = [{ text: finalPrompt }];
+      requestReferenceImages.forEach((image) => {
+        content.push({ image });
+      });
       if (parsedCanvasImage) {
         content.push({ image: String(canvasImage || "").trim() });
       }
@@ -2307,7 +2795,7 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
         },
       };
       responsePayload = await requestOpenAiImageGenerate({
-        apiKey: effectiveOpenAiKey,
+        apiKey: effectiveImageKey,
         payload: openAiPayload,
         slideAspect,
         baseUrl: openAiImageBaseUrl,
@@ -2328,7 +2816,7 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
       page.generationStatus = images.length > 0 ? "done" : "error";
       page.generationError = images.length > 0 ? "" : "没有拿到图片结果。";
       page.extraPrompt = String(extraPrompt || "").trim();
-      page.pageStylePrompt = String(pageStylePrompt || "").trim();
+      page.pageStylePrompt = effectivePageStylePrompt;
       const previousImages = Array.isArray(page.resultImages) ? page.resultImages.filter(Boolean) : [];
       const mergedImages = Array.from(new Set([
         ...images.filter(Boolean),
@@ -2362,6 +2850,7 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
       return res.status(error.status || 500).json({
         code: "WorkflowPageGenerateFailed",
         message: error.message || "生成页面失败。",
+        details: buildPublicImageErrorDetails(error),
       });
     }
   });
@@ -2376,6 +2865,7 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
       pageTitle,
       extraPrompt,
       pageStylePrompt,
+      referenceImages,
       canvasImage,
       onscreenContent,
     } = req.body || {};
@@ -2396,12 +2886,18 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
         preparePageForGeneration(job, page, "prompt-copy");
       }
       // 使用 GPT 简化 prompt
-      const finalPrompt = buildGptFinalImagePrompt(page, String(pageStylePrompt || "").trim());
+      const effectivePageStylePrompt = String(pageStylePrompt || page.pageStylePrompt || page.extraPrompt || "").trim();
+      const attachedReferenceImages = normalizeWorkflowReferenceImages(referenceImages);
+      const referenceInstruction = buildReferenceImageInstruction(attachedReferenceImages.length, Boolean(canvasImage));
+      const baseFinalPrompt = attachedReferenceImages.length && page?.promptOnlyImport
+        ? buildReferenceDrivenImagePrompt(page)
+        : buildGptFinalImagePrompt(page, effectivePageStylePrompt);
+      const finalPrompt = [referenceInstruction, baseFinalPrompt].filter(Boolean).join("\n\n");
       page.jitDecoration = null;
       page.pageTypePromptModule = null;
       const finalPromptTrace = {
         promptMode: "gpt-simple",
-        pageStylePrompt: String(pageStylePrompt || "").trim(),
+        pageStylePrompt: effectivePageStylePrompt,
         basicIncluded: false,
         questionnaireAnchorIncluded: false,
         layoutMapping: null,
@@ -2409,7 +2905,7 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
         jitDecoration: null,
       };
       page.extraPrompt = String(extraPrompt || "").trim();
-      page.pageStylePrompt = String(pageStylePrompt || "").trim();
+      page.pageStylePrompt = effectivePageStylePrompt;
       page.promptTrace.finalImage = {
         builtAt: new Date().toISOString(),
         model: selectedImageModel,
@@ -2418,6 +2914,7 @@ function normalizeThemeDefinition(result, fallbackThemeName, decorationLevel, pr
         extraPrompt: String(extraPrompt || "").trim(),
         ...finalPromptTrace,
         hasCanvasImage: Boolean(canvasImage),
+        referenceImageCount: attachedReferenceImages.length,
         searchMetadata: null,
       };
       refreshJobProgress(job);

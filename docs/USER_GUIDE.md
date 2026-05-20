@@ -1,10 +1,10 @@
 # PPTGEN 使用指南
 
-PPTGEN 是一个把文字内容生成 PPT 图片页，并导出为 PowerPoint 文件的桌面工具。当前版本生成的每一页本质上是一张图片，因此它适合快速制作视觉完整的演示稿；如果图片里有文字错误，可以重新生成、局部改图，或在 PowerPoint/WPS 里用色块覆盖后手动补字。
+PPTGEN 是一个把文字内容生成 PPT 图片页，并导出为 PowerPoint 文件的桌面工具。当前版本默认使用 `gpt-image-2-vip`，通过 Grsai `https://grsai.dakka.com.cn/v1/api/generate` 生成最终图片页；旧版代理 `https://api.bltcy.ai` 已不再作为默认入口。生成的每一页本质上是一张图片，因此它适合快速制作视觉完整的演示稿；如果图片里有文字错误，可以重新生成、局部改图，或在 PowerPoint/WPS 里用色块覆盖后手动补字。
 
 ## 1. 安装与启动
 
-1. 双击 `PPTGEN-1.0.0-x64.exe` 安装包。
+1. 双击 `PPTGEN Studio Setup 1.0.3.exe` 安装包。
 2. 按提示选择安装目录。
 3. 安装完成后，从桌面快捷方式或开始菜单打开 `PPTGEN`。
 4. 首次启动可能需要几秒钟，因为软件会同时启动本地服务和桌面窗口。
@@ -16,18 +16,16 @@ API Key 会保存在本机应用数据里。关闭软件后再次打开，通常
 进入软件后，先在设置或首页的 Key 区填写需要的密钥：
 
 - `DashScope / Qwen API Key`：用于文本拆分、内容整理和部分提示词生成。
-- `GPT Image 2 API Key`：用于 GPT Image 2 生图。
-- `Grsai API Key`：用于 NanoBanana 2 / NanoBanana Pro 生图。
+- `GPT Image 2 VIP API Key`：用于 Grsai / GPT Image 2 VIP 生图。
+- `GPT Host / Endpoint`：默认填写 `https://grsai.dakka.com.cn/v1/api/generate`，也可以填写 `https://grsaiapi.com` 等兼容主机，系统会自动归一到当前接口。
 
-如果只使用 GPT Image 2，也仍建议填写 DashScope / Qwen Key，因为内容拆分阶段会用到文本模型。
+如果只使用 GPT Image 2 VIP，也仍建议填写 DashScope / Qwen Key，因为内容拆分阶段会用到文本模型。
 
 ## 3. 选择生图模型
 
 打开软件后先选择最终生图模型：
 
-- `GPT Image 2`：推荐优先使用，整体效果最好，适合高质量成稿。
-- `NanoBanana 2`：速度和效果较均衡，适合批量生成和快速迭代。
-- `NanoBanana Pro`：适合更复杂、更精细的画面尝试。
+- `GPT Image 2 VIP`：当前默认最终生图模型，适合高质量成稿和批量页面生成。
 
 选择模型后点击确认，进入内容阶段。
 
@@ -127,4 +125,4 @@ API Key 会保存在本机应用数据里。关闭软件后再次打开，通常
 
 ### 可以把这个工具发给别人用吗？
 
-可以。推荐分发安装包 `PPTGEN-1.0.0-x64.exe`。对方安装后填写自己的 API Key 即可使用。
+可以。推荐分发安装包 `PPTGEN Studio Setup 1.0.3.exe`。对方安装后填写自己的 API Key 即可使用。

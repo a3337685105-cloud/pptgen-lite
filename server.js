@@ -12,6 +12,7 @@ const crypto = require("crypto");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const fsp = require("fs/promises");
+const os = require("os");
 const path = require("path");
 const express = require("express");
 const multer = require("multer");
@@ -23,6 +24,7 @@ const { installWorkflowRoutes } = require("./workflow-service");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const HOST = process.env.PPTGEN_HOST || "127.0.0.1";
 let ACTIVE_PORT = Number(PORT);
 const ROOT_DIR = __dirname;
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
@@ -46,7 +48,10 @@ const upload = multer({
 const REGION_MAP = {
   beijing: "https://dashscope.aliyuncs.com",
 };
-const OPENAI_IMAGE_DEFAULT_HOST = "https://api.bltcy.ai";
+const GRSAI_IMAGE_DEFAULT_HOST = "https://grsai.dakka.com.cn";
+const GRSAI_API_GENERATE_PATH = "/v1/api/generate";
+const GRSAI_DRAW_COMPLETIONS_PATH = "/v1/draw/completions";
+const OPENAI_IMAGE_DEFAULT_HOST = `${GRSAI_IMAGE_DEFAULT_HOST}${GRSAI_API_GENERATE_PATH}`;
 const OPENAI_IMAGE_GENERATIONS_PATH = "/v1/images/generations";
 const WHATAI_IMAGE_DEFAULT_HOST = "https://api.whatai.cc";
 const WHATAI_IMAGE_FALLBACK_DELAY_MS = clampNumber(process.env.WHATAI_IMAGE_FALLBACK_DELAY_MS, 60000, 5000, 300000);
@@ -54,6 +59,7 @@ const WHATAI_IMAGE_POLL_INTERVAL_MS = clampNumber(process.env.WHATAI_IMAGE_POLL_
 const WHATAI_IMAGE_POLL_TIMEOUT_MS = clampNumber(process.env.WHATAI_IMAGE_POLL_TIMEOUT_MS, 240000, 30000, 900000);
 const OPENAI_IMAGE_MODELS = new Set([
   "gpt-image-2",
+  "gpt-image-2-vip",
 ]);
 function clampNumber(value, fallback, min, max) {
   const numeric = Number(value);
@@ -108,7 +114,7 @@ function resolveDashScopeApiKey(apiKey) {
 
 
 function resolveOpenAiImageApiKey(apiKey) {
-  return String(apiKey || process.env.OPENAI_IMAGE_API_KEY || process.env.OPENAI_API_KEY || "").trim();
+  return String(apiKey || process.env.OPENAI_IMAGE_API_KEY || process.env.OPENAI_API_KEY || process.env.GRSAI_API_KEY || process.env.GRSAI_IMAGE_API_KEY || "").trim();
 }
 
 function resolveWhatAiImageApiKey(apiKey) {
@@ -125,24 +131,84 @@ function isHostedImageModel(model) {
   return isOpenAiImageModel(model);
 }
 
+function resolveGrsaiDrawEndpoint(endpointOrHost) {
+  const value = String(
+    endpointOrHost
+    || process.env.GRSAI_DRAW_COMPLETIONS_URL
+    || process.env.GRSAI_IMAGE_BASE_URL
+    || process.env.OPENAI_IMAGE_GENERATIONS_URL
+    || process.env.OPENAI_IMAGE_BASE_URL
+    || process.env.OPENAI_BASE_URL
+    || GRSAI_IMAGE_DEFAULT_HOST,
+  ).trim().replace(/\/+$/, "");
+  if (isGrsaiApiGenerateEndpoint(value) || isGrsaiLegacyDrawEndpoint(value)) {
+    return value;
+  }
+  if (/\/v1$/i.test(value)) {
+    return `${value}/api/generate`;
+  }
+  return `${value}${GRSAI_API_GENERATE_PATH}`;
+}
+
+function isGrsaiApiGenerateEndpoint(value) {
+  return new RegExp(`${GRSAI_API_GENERATE_PATH.replace(/\//g, "\\/")}$`, "i").test(String(value || "").trim());
+}
+
+function isGrsaiLegacyDrawEndpoint(value) {
+  return new RegExp(`${GRSAI_DRAW_COMPLETIONS_PATH.replace(/\//g, "\\/")}$`, "i").test(String(value || "").trim());
+}
+
+function isGrsaiDrawEndpoint(value) {
+  const endpoint = String(value || "").trim();
+  return isGrsaiApiGenerateEndpoint(endpoint)
+    || isGrsaiLegacyDrawEndpoint(endpoint)
+    || /(^|\/\/)(?:[^/]*\.)?(?:grsaiapi\.com|grsai\.dakka\.com\.cn)(?:[/:]|$)/i.test(endpoint);
+}
 
 function resolveOpenAiImageEndpoint(endpointOrHost) {
   const value = String(
     endpointOrHost
+    || process.env.GRSAI_DRAW_COMPLETIONS_URL
+    || process.env.GRSAI_IMAGE_BASE_URL
     || process.env.OPENAI_IMAGE_GENERATIONS_URL
     || process.env.OPENAI_IMAGE_BASE_URL
     || process.env.OPENAI_BASE_URL
     || OPENAI_IMAGE_DEFAULT_HOST,
   ).trim().replace(/\/+$/, "");
+  if (!value || isGrsaiDrawEndpoint(value)) {
+    return resolveGrsaiDrawEndpoint(value);
+  }
   if (new RegExp(`${OPENAI_IMAGE_GENERATIONS_PATH.replace(/\//g, "\\/")}$`, "i").test(value)) {
     return value;
   }
+  if (/\/v1$/i.test(value)) {
+    return `${value}/images/generations`;
+  }
   return `${value}${OPENAI_IMAGE_GENERATIONS_PATH}`;
+}
+
+function resolveOpenAiBaseHost(endpointOrHost) {
+  const endpoint = resolveOpenAiImageEndpoint(endpointOrHost);
+  if (isGrsaiDrawEndpoint(endpoint)) {
+    return endpoint
+      .replace(new RegExp(`${GRSAI_API_GENERATE_PATH.replace(/\//g, "\\/")}$`, "i"), "")
+      .replace(new RegExp(`${GRSAI_DRAW_COMPLETIONS_PATH.replace(/\//g, "\\/")}$`, "i"), "")
+      .replace(/\/+$/, "");
+  }
+  return endpoint
+    .replace(new RegExp(`${OPENAI_IMAGE_GENERATIONS_PATH.replace(/\//g, "\\/")}$`, "i"), "")
+    .replace(/\/+$/, "");
+}
+
+function resolveOpenAiModelsEndpoint(endpointOrHost) {
+  return `${resolveOpenAiBaseHost(endpointOrHost)}/v1/models`;
 }
 
 function resolveOpenAiImageEndpoints(endpointOrHost) {
   const configured = String(
     endpointOrHost
+    || process.env.GRSAI_DRAW_COMPLETIONS_URL
+    || process.env.GRSAI_IMAGE_BASE_URL
     || process.env.OPENAI_IMAGE_GENERATIONS_URL
     || process.env.OPENAI_IMAGE_BASE_URL
     || process.env.OPENAI_BASE_URL
@@ -208,6 +274,44 @@ function normalizeOpenAiImageSize(size, slideAspect) {
   if (quality === "4K") return "3840x2160";
   if (quality === "1K") return "1536x864";
   return "2048x1152";
+}
+
+const GRSAI_VIP_SIZE_PRESETS = {
+  "1:1": { "1K": "1024x1024", "2K": "2048x2048", "4K": "2880x2880" },
+  "16:9": { "1K": "1280x720", "2K": "2048x1152", "4K": "3840x2160" },
+  "9:16": { "1K": "720x1280", "2K": "1152x2048", "4K": "2160x3840" },
+  "4:3": { "1K": "1152x864", "2K": "2304x1728", "4K": "3264x2448" },
+  "3:4": { "1K": "864x1152", "2K": "1728x2304", "4K": "2448x3264" },
+  "3:2": { "1K": "1536x1024", "2K": "2048x1360", "4K": "3504x2336" },
+  "2:3": { "1K": "1024x1536", "2K": "1360x2048", "4K": "2336x3504" },
+  "5:4": { "1K": "1120x896", "2K": "2240x1792", "4K": "3200x2560" },
+  "4:5": { "1K": "896x1120", "2K": "1792x2240", "4K": "2560x3200" },
+  "21:9": { "1K": "1456x624", "2K": "2912x1248", "4K": "3840x1648" },
+  "9:21": { "1K": "624x1456", "2K": "1248x2912", "4K": "1648x3840" },
+  "1:3": { "2K": "688x2048", "4K": "1280x3840" },
+  "3:1": { "2K": "2048x688", "4K": "3840x1280" },
+  "2:1": { "1K": "1536x768", "2K": "3072x1536", "4K": "3840x1920" },
+  "1:2": { "1K": "768x1536", "2K": "1536x3072", "4K": "1920x3840" },
+};
+
+function normalizeGrsaiVipPixelSize(size, slideAspect) {
+  const quality = String(size || "").trim().toUpperCase();
+  const normalizedQuality = quality === "1K" || quality === "4K" ? quality : "2K";
+  const aspect = String(slideAspect || "16:9").trim();
+  const preset = GRSAI_VIP_SIZE_PRESETS[aspect] || GRSAI_VIP_SIZE_PRESETS["16:9"];
+  return preset[normalizedQuality] || preset["2K"] || "2048x1152";
+}
+
+function normalizeGrsaiAspectRatio(size, slideAspect, model) {
+  const raw = String(size || "").trim().toLowerCase().replace("*", "x");
+  if (/^\d+x\d+$/.test(raw)) return raw;
+  const normalizedModel = String(model || "").trim();
+  if (normalizedModel === "gpt-image-2-vip") {
+    return normalizeGrsaiVipPixelSize(size, slideAspect);
+  }
+  const aspect = String(slideAspect || "").trim();
+  if (/^\d+:\d+$/.test(aspect)) return aspect;
+  return "16:9";
 }
 
 function parseDataUrl(dataUrl) {
@@ -330,6 +434,144 @@ async function saveReferenceImage(file) {
   };
 }
 
+function runPowerShellJson(script, env = {}, timeoutMs = 120000) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      script,
+    ], {
+      windowsHide: true,
+      env: { ...process.env, ...env },
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(new Error("PowerPoint 导出原页截图超时。"));
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || stdout.trim() || `PowerShell exited with code ${code}.`));
+        return;
+      }
+      const raw = stdout.trim().split(/\r?\n/).filter(Boolean).pop() || "";
+      try {
+        resolve(JSON.parse(raw));
+      } catch (error) {
+        reject(new Error(`PowerPoint 导出结果解析失败：${raw.slice(0, 300)}`));
+      }
+    });
+  });
+}
+
+async function exportPptxSlideImages(buffer, originalname = "") {
+  if (process.platform !== "win32") {
+    throw new Error("当前系统不是 Windows，无法使用 PowerPoint 导出原页截图。");
+  }
+
+  const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "pptgen-pptx-"));
+  const inputPath = path.join(tmpRoot, "source.pptx");
+  const exportPrefix = `pptx_${buildTimestamp()}_${crypto.randomUUID().slice(0, 8)}`;
+  await fsp.writeFile(inputPath, buffer);
+  await fsp.mkdir(REFERENCE_ASSETS_DIR, { recursive: true });
+
+  const script = `
+$ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Runtime.InteropServices
+$inputPath = $env:PPTGEN_PPTX_PATH
+$outputDir = $env:PPTGEN_PPTX_OUTPUT_DIR
+$prefix = $env:PPTGEN_PPTX_PREFIX
+$ppt = $null
+$presentation = $null
+try {
+  $ppt = New-Object -ComObject PowerPoint.Application
+  $presentation = $ppt.Presentations.Open($inputPath, $true, $false, $false)
+  $slideWidth = [double]$presentation.PageSetup.SlideWidth
+  $slideHeight = [double]$presentation.PageSetup.SlideHeight
+  $targetWidth = 1600
+  $targetHeight = [int][Math]::Round($targetWidth * $slideHeight / $slideWidth)
+  if ($targetHeight -lt 1) { $targetHeight = 900 }
+  $images = @()
+  for ($i = 1; $i -le $presentation.Slides.Count; $i++) {
+    $fileName = "{0}_p{1:D3}.png" -f $prefix, $i
+    $target = Join-Path $outputDir $fileName
+    $slide = $presentation.Slides.Item($i)
+    $slide.Export($target, "PNG", $targetWidth, $targetHeight)
+    $images += [pscustomobject]@{
+      pageNumber = $i
+      fileName = $fileName
+      width = $targetWidth
+      height = $targetHeight
+    }
+    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($slide) | Out-Null
+  }
+  [pscustomobject]@{
+    ok = $true
+    slideCount = $presentation.Slides.Count
+    images = $images
+  } | ConvertTo-Json -Compress -Depth 6
+} finally {
+  if ($presentation -ne $null) {
+    try { $presentation.Close() } catch {}
+    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($presentation) | Out-Null
+  }
+  if ($ppt -ne $null) {
+    try { $ppt.Quit() } catch {}
+    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($ppt) | Out-Null
+  }
+  [GC]::Collect()
+  [GC]::WaitForPendingFinalizers()
+}
+`;
+
+  try {
+    const result = await runPowerShellJson(script, {
+      PPTGEN_PPTX_PATH: inputPath,
+      PPTGEN_PPTX_OUTPUT_DIR: REFERENCE_ASSETS_DIR,
+      PPTGEN_PPTX_PREFIX: exportPrefix,
+    }, 180000);
+    return (Array.isArray(result?.images) ? result.images : [])
+      .map((item) => ({
+        pageNumber: Number(item.pageNumber || 0),
+        fileName: String(item.fileName || ""),
+        previewUrl: `/reference-assets/${encodeURIComponent(String(item.fileName || ""))}`,
+        width: Number(item.width || 0),
+        height: Number(item.height || 0),
+        sourceFileName: originalname,
+      }))
+      .filter((item) => item.pageNumber && item.fileName);
+  } finally {
+    const tmpBase = path.join(os.tmpdir(), "pptgen-pptx-");
+    if (tmpRoot.startsWith(tmpBase)) {
+      await fsp.rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+}
+
 async function loadReferenceAssetAsDataUrl(referenceFile) {
   const fileName = String(referenceFile?.assetFileName || "").trim()
     || (String(referenceFile?.previewUrl || "").startsWith("/reference-assets/")
@@ -417,6 +659,68 @@ function cleanUpstreamErrorMessage(message, fallback = "上游服务请求失败
     return fallback;
   }
   return raw.replace(/\s+/g, " ").slice(0, 300);
+}
+
+function sanitizeLogUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    url.username = "";
+    url.password = "";
+    ["key", "api_key", "access_token", "token", "secret"].forEach((name) => {
+      if (url.searchParams.has(name)) url.searchParams.set(name, "[redacted]");
+    });
+    return url.toString();
+  } catch {
+    return raw.replace(/([?&](?:key|api_key|access_token|token|secret)=)[^&]+/gi, "$1[redacted]");
+  }
+}
+
+function extractUpstreamErrorMessage(data, fallback) {
+  return data?.error?.message
+    || data?.message
+    || data?.data?.message
+    || data?.error
+    || fallback;
+}
+
+function createImageUpstreamError({ provider, endpoint, status, model, data, fallback }) {
+  const upstreamMessage = extractUpstreamErrorMessage(data, fallback);
+  const error = new Error(cleanUpstreamErrorMessage(upstreamMessage, fallback));
+  error.status = status || 502;
+  error.details = data;
+  error.provider = provider || "";
+  error.endpoint = sanitizeLogUrl(endpoint);
+  error.model = String(model || "").trim();
+  error.upstreamCode = String(data?.error?.code || data?.code || data?.data?.code || "").trim();
+  error.upstreamRequestId = String(data?.request_id || data?.id || data?.error?.request_id || data?.data?.request_id || "").trim();
+  logImageUpstreamError(error);
+  return error;
+}
+
+function logImageUpstreamError(error) {
+  const payload = {
+    provider: error?.provider || "",
+    endpoint: sanitizeLogUrl(error?.endpoint || ""),
+    status: error?.status || "",
+    model: error?.model || "",
+    upstreamCode: error?.upstreamCode || "",
+    upstreamRequestId: error?.upstreamRequestId || "",
+    message: cleanUpstreamErrorMessage(error?.message || "", "图片上游请求失败。"),
+  };
+  console.warn(`[image-upstream-error] ${JSON.stringify(payload)}`);
+}
+
+function buildPublicImageErrorDetails(error) {
+  return {
+    provider: error?.provider || "",
+    endpoint: sanitizeLogUrl(error?.endpoint || ""),
+    status: error?.status || "",
+    model: error?.model || "",
+    upstreamCode: error?.upstreamCode || "",
+    upstreamRequestId: error?.upstreamRequestId || "",
+  };
 }
 
 async function requestJsonViaPowerShell({ url, method = "POST", headers = {}, body }) {
@@ -568,12 +872,45 @@ function buildOpenAiImageGenerationBody({ payload, slideAspect }) {
     error.status = 400;
     throw error;
   }
+  const model = String(payload?.model || "gpt-image-2-vip").trim() || "gpt-image-2-vip";
   return {
-    model: String(payload?.model || "gpt-image-2").trim() || "gpt-image-2",
+    model,
     prompt: extracted.prompt,
     size: normalizeOpenAiImageSize(payload?.parameters?.size, slideAspect),
+    _grsaiAspectRatio: normalizeGrsaiAspectRatio(payload?.parameters?.size, slideAspect, model),
     response_format: "b64_json",
     ...(extracted.urls.length ? { image: extracted.urls } : {}),
+  };
+}
+
+function buildOpenAiCompatibleImageBody(body) {
+  const { _grsaiAspectRatio, ...compatibleBody } = body || {};
+  return compatibleBody;
+}
+
+function buildGrsaiDrawCompletionBody(body, endpoint) {
+  const urls = Array.isArray(body?.image)
+    ? body.image.filter(Boolean)
+    : (body?.image ? [body.image] : []);
+  const model = String(body?.model || "gpt-image-2-vip").trim() || "gpt-image-2-vip";
+  const prompt = String(body?.prompt || "").trim();
+  const aspectRatio = String(body?._grsaiAspectRatio || body?.size || "2048x1152").trim();
+  if (isGrsaiApiGenerateEndpoint(endpoint)) {
+    return {
+      model,
+      prompt,
+      images: urls,
+      aspectRatio,
+      replyType: "json",
+    };
+  }
+  return {
+    model,
+    prompt,
+    aspectRatio,
+    quality: "auto",
+    shutProgress: true,
+    ...(urls.length ? { urls } : {}),
   };
 }
 
@@ -620,6 +957,17 @@ async function normalizeOpenAiImageGenerationResponse(data, model) {
         const current = input.trim();
 
         if (/^https?:\/\//i.test(current)) {
+          try {
+            const response = await fetch(current);
+            if (response.ok) {
+              const imageBuffer = Buffer.from(await response.arrayBuffer());
+              const detectedExtension = getImageExtensionFromBuffer(imageBuffer);
+              if (detectedExtension) {
+                extension = detectedExtension || pickExtensionFromMimeType(response.headers.get("content-type") || "") || extension;
+                return imageBuffer;
+              }
+            }
+          } catch {}
           finalUrl = current;
           return null;
         }
@@ -763,6 +1111,123 @@ function collectImageCandidates(value, output = [], depth = 0) {
   return output;
 }
 
+function parseJsonMaybe(text) {
+  const value = String(text || "").trim();
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function parseGrsaiStreamText(text) {
+  const raw = String(text || "").trim();
+  const direct = parseJsonMaybe(raw);
+  if (direct) return direct;
+
+  const parsedChunks = [];
+  raw.split(/\r?\n+/).forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed === "[DONE]") return;
+    const normalized = trimmed.replace(/^data:\s*/i, "").trim();
+    if (!normalized || normalized === "[DONE]") return;
+    const parsed = parseJsonMaybe(normalized);
+    if (parsed) parsedChunks.push(parsed);
+  });
+
+  if (parsedChunks.length) {
+    return parsedChunks.find((item) => String(item?.status || "").toLowerCase() === "succeeded")
+      || parsedChunks.find((item) => Array.isArray(item?.results) || item?.url)
+      || parsedChunks[parsedChunks.length - 1];
+  }
+
+  return {
+    error: raw.slice(0, 1000) || "Grsai draw endpoint returned an empty response.",
+  };
+}
+
+function normalizeGrsaiDrawResponse(data, model) {
+  const urls = Array.from(new Set(collectImageCandidates(data)));
+  if (!urls.length) {
+    const status = String(data?.status || "").trim().toLowerCase();
+    const message = data?.error || data?.failure_reason || data?.msg || data?.message || (status ? `Grsai draw status: ${status}` : "Grsai draw endpoint returned no image.");
+    const error = new Error(cleanUpstreamErrorMessage(message, "Grsai draw endpoint returned no image."));
+    error.status = status === "failed" ? 502 : 500;
+    error.details = data;
+    error.provider = "grsai-draw";
+    error.model = model;
+    throw error;
+  }
+  return normalizeOpenAiImageGenerationResponse({
+    id: data?.id,
+    data: urls,
+    raw: data,
+  }, model);
+}
+
+async function requestGrsaiDrawCompletion({ apiKey, body, endpoint }) {
+  const requestBody = buildGrsaiDrawCompletionBody(body, endpoint);
+  let response = null;
+  let text = "";
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(requestBody),
+    });
+    text = await response.text();
+  } catch (error) {
+    error.provider = "grsai-draw";
+    error.endpoint = sanitizeLogUrl(endpoint);
+    error.model = body.model;
+    logImageUpstreamError(error);
+    throw error;
+  }
+
+  const parsed = parseGrsaiStreamText(text);
+  if (!response.ok) {
+    throw createImageUpstreamError({
+      provider: "grsai-draw",
+      endpoint,
+      status: response.status || 500,
+      model: body.model,
+      data: parsed,
+      fallback: "Grsai 图片生成请求失败，请稍后重试。",
+    });
+  }
+
+  const status = String(parsed?.status || "").trim().toLowerCase();
+  if (status === "failed" || parsed?.error || parsed?.failure_reason) {
+    throw createImageUpstreamError({
+      provider: "grsai-draw",
+      endpoint,
+      status: 502,
+      model: body.model,
+      data: parsed,
+      fallback: "Grsai 图片生成失败，请稍后重试。",
+    });
+  }
+
+  let normalized = null;
+  try {
+    normalized = await normalizeGrsaiDrawResponse(parsed, body.model);
+  } catch (error) {
+    error.provider = error.provider || "grsai-draw";
+    error.endpoint = sanitizeLogUrl(endpoint);
+    error.model = body.model;
+    logImageUpstreamError(error);
+    throw error;
+  }
+  normalized.provider = "grsai-draw";
+  normalized.endpoint = endpoint;
+  normalized.raw = parsed;
+  return normalized;
+}
+
 function extractTaskStatus(data) {
   const candidates = [
     data?.status,
@@ -776,6 +1241,7 @@ function extractTaskStatus(data) {
 }
 
 async function requestWhatAiAsyncImageGenerate({ apiKey, body }) {
+  const compatibleBody = buildOpenAiCompatibleImageBody(body);
   const submitUrl = `${buildWhatAiUrl(OPENAI_IMAGE_GENERATIONS_PATH)}?async=true`;
   const parsed = await requestJsonViaFetch({
     method: "POST",
@@ -784,14 +1250,17 @@ async function requestWhatAiAsyncImageGenerate({ apiKey, body }) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(compatibleBody),
   });
   if (!parsed.ok) {
-    const upstreamMessage = parsed.data?.error?.message || parsed.data?.message || "WhatAI image request failed.";
-    const error = new Error(cleanUpstreamErrorMessage(upstreamMessage, "WhatAI image request failed. Please try again later."));
-    error.status = parsed.status || 500;
-    error.details = parsed.data;
-    throw error;
+    throw createImageUpstreamError({
+      provider: "whatai-image",
+      endpoint: submitUrl,
+      status: parsed.status || 500,
+      model: compatibleBody.model,
+      data: parsed.data,
+      fallback: "WhatAI image request failed. Please try again later.",
+    });
   }
 
   const taskId = String(
@@ -821,16 +1290,19 @@ async function requestWhatAiAsyncImageGenerate({ apiKey, body }) {
       },
     });
     if (!task.ok) {
-      const upstreamMessage = task.data?.error?.message || task.data?.message || "WhatAI image task query failed.";
-      const error = new Error(cleanUpstreamErrorMessage(upstreamMessage, "WhatAI image task query failed."));
-      error.status = task.status || 500;
-      error.details = task.data;
-      throw error;
+      throw createImageUpstreamError({
+        provider: "whatai-image",
+        endpoint: taskUrl,
+        status: task.status || 500,
+        model: compatibleBody.model,
+        data: task.data,
+        fallback: "WhatAI image task query failed.",
+      });
     }
 
     const images = Array.from(new Set(collectImageCandidates(task.data)));
     if (images.length > 0) {
-      const normalized = await normalizeOpenAiImageGenerationResponse({ id: taskId, data: images }, body.model);
+      const normalized = await normalizeOpenAiImageGenerationResponse({ id: taskId, data: images }, compatibleBody.model);
       normalized.provider = "whatai-image";
       normalized.endpoint = taskUrl;
       normalized.raw = task.data;
@@ -839,15 +1311,23 @@ async function requestWhatAiAsyncImageGenerate({ apiKey, body }) {
 
     const status = extractTaskStatus(task.data);
     if (/fail|error|cancel|reject|expired/.test(status)) {
-      const error = new Error(task.data?.message || task.data?.data?.message || "WhatAI image task failed.");
-      error.status = 502;
-      error.details = task.data;
-      throw error;
+      throw createImageUpstreamError({
+        provider: "whatai-image",
+        endpoint: taskUrl,
+        status: 502,
+        model: compatibleBody.model,
+        data: task.data,
+        fallback: "WhatAI image task failed.",
+      });
     }
   }
 
   const error = new Error("WhatAI image task timed out.");
   error.status = 504;
+  error.provider = "whatai-image";
+  error.endpoint = "";
+  error.model = compatibleBody.model;
+  logImageUpstreamError(error);
   throw error;
 }
 
@@ -871,6 +1351,10 @@ async function requestPrimaryOpenAiImageGenerate({ apiKey, body, baseUrl }) {
     let lastError = null;
     for (const url of endpoints) {
       try {
+        if (isGrsaiDrawEndpoint(url)) {
+          return await requestGrsaiDrawCompletion({ apiKey, body, endpoint: url });
+        }
+        const compatibleBody = buildOpenAiCompatibleImageBody(body);
         const parsed = await requestJsonViaFetch({
           method: "POST",
           url,
@@ -878,42 +1362,73 @@ async function requestPrimaryOpenAiImageGenerate({ apiKey, body, baseUrl }) {
             "Content-Type": "application/json",
             Authorization: `Bearer ${apiKey}`,
           },
-          body: JSON.stringify(body),
+          body: JSON.stringify(compatibleBody),
         });
         if (!parsed.ok) {
-          const upstreamMessage = parsed.data?.error?.message || parsed.data?.message || "OpenAI image request failed.";
-          const error = new Error(cleanUpstreamErrorMessage(upstreamMessage, "OpenAI image request failed. Please try again later."));
-          error.status = parsed.status || 500;
-          error.details = parsed.data;
+          const error = createImageUpstreamError({
+            provider: "openai-image",
+            endpoint: url,
+            status: parsed.status || 500,
+            model: compatibleBody.model,
+            data: parsed.data,
+            fallback: "OpenAI image request failed. Please try again later.",
+          });
           lastError = error;
           continue;
         }
-        const normalized = await normalizeOpenAiImageGenerationResponse(parsed.data, body.model);
+        const normalized = await normalizeOpenAiImageGenerationResponse(parsed.data, compatibleBody.model);
         normalized.endpoint = url;
         return normalized;
       } catch (error) {
+        if (!error.provider) {
+          error.provider = "openai-image";
+          error.endpoint = sanitizeLogUrl(url);
+          error.model = body.model;
+          logImageUpstreamError(error);
+        }
         lastError = error;
       }
     }
     throw lastError || new Error("OpenAI image request failed.");
   }
-  const parsed = await requestJsonViaFetch({
-    method: "POST",
-    url: buildOpenAiImageGenerationsUrl(baseUrl),
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!parsed.ok) {
-    const upstreamMessage = parsed.data?.error?.message || parsed.data?.message || "OpenAI 图片生成请求失败。";
-    const error = new Error(cleanUpstreamErrorMessage(upstreamMessage, "OpenAI 图片生成请求失败，请稍后重试。"));
-    error.status = parsed.status || 500;
-    error.details = parsed.data;
+  const endpoint = buildOpenAiImageGenerationsUrl(baseUrl);
+  if (isGrsaiDrawEndpoint(endpoint)) {
+    return requestGrsaiDrawCompletion({ apiKey, body, endpoint });
+  }
+  const compatibleBody = buildOpenAiCompatibleImageBody(body);
+  let parsed = null;
+  try {
+    parsed = await requestJsonViaFetch({
+      method: "POST",
+      url: endpoint,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(compatibleBody),
+    });
+  } catch (error) {
+    if (!error.provider) {
+      error.provider = "openai-image";
+      error.endpoint = sanitizeLogUrl(endpoint);
+      error.model = compatibleBody.model;
+      logImageUpstreamError(error);
+    }
     throw error;
   }
-  return normalizeOpenAiImageGenerationResponse(parsed.data, body.model);
+  if (!parsed.ok) {
+    throw createImageUpstreamError({
+      provider: "openai-image",
+      endpoint,
+      status: parsed.status || 500,
+      model: compatibleBody.model,
+      data: parsed.data,
+      fallback: "OpenAI 图片生成请求失败，请稍后重试。",
+    });
+  }
+  const normalized = await normalizeOpenAiImageGenerationResponse(parsed.data, compatibleBody.model);
+  normalized.endpoint = endpoint;
+  return normalized;
 }
 
 function extractPromptAndImagesFromPayload(payload) {
@@ -1070,11 +1585,11 @@ async function extractDocxText(buffer) {
   const entry = zip.file("word/document.xml");
   if (!entry) return "";
   const xml = await entry.async("string");
-  const matches = [...xml.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g)];
+  const matches = [...xml.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)];
   return normalizeExtractedText(matches.map((item) => decodeXmlEntities(item[1])).join("\n"));
 }
 
-async function extractPptxText(buffer) {
+async function extractPptxSlides(buffer) {
   const zip = await JSZip.loadAsync(buffer);
   const slideFiles = Object.keys(zip.files)
     .filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
@@ -1087,15 +1602,53 @@ async function extractPptxText(buffer) {
   const slides = [];
   for (const slideName of slideFiles) {
     const xml = await zip.file(slideName).async("string");
-    const texts = [...xml.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g)]
+    const texts = [...xml.matchAll(/<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g)]
       .map((item) => decodeXmlEntities(item[1]))
       .filter(Boolean);
-    if (texts.length) {
-      const slideIndex = Number(slideName.match(/slide(\d+)\.xml/i)?.[1] || slides.length + 1);
-      slides.push(`Slide ${slideIndex}\n${texts.join("\n")}`);
+    const slideIndex = Number(slideName.match(/slide(\d+)\.xml/i)?.[1] || slides.length + 1);
+    const normalizedText = normalizeExtractedText(texts.join("\n"));
+    const lines = normalizedText.split("\n").map((line) => line.trim()).filter(Boolean);
+    slides.push({
+      pageNumber: slideIndex,
+      text: normalizedText,
+      title: pickPptxSlideTitle(lines, slideIndex),
+      body: lines.slice(1).join("\n") || lines[0] || "",
+    });
+  }
+  return slides;
+}
+
+function pickPptxSlideTitle(lines = [], slideIndex = 1) {
+  const cleanLines = (Array.isArray(lines) ? lines : [])
+    .map((line) => String(line || "").trim())
+    .filter(Boolean);
+  const isNoise = (line) => /^[XYZxyz]$/.test(line)
+    || /^-?\d+$/.test(line)
+    || /^[()（）\s-]+$/.test(line)
+    || /^[<>]+$/.test(line);
+  for (let index = 0; index < cleanLines.length; index += 1) {
+    const line = cleanLines[index];
+    if (isNoise(line)) continue;
+    const next = cleanLines[index + 1] || "";
+    if (/^[A-Za-z]{2,8}$/.test(line) && /[\u3400-\u9fff]/.test(next) && !isNoise(next)) {
+      return `${line}${next}`;
+    }
+    if (/[\u3400-\u9fff]/.test(line) && line.length >= 2 && line.length <= 40) {
+      return line;
     }
   }
-  return normalizeExtractedText(slides.join("\n\n"));
+  return cleanLines.find((line) => !isNoise(line) && line.length > 1 && line.length <= 60) || `Slide ${slideIndex}`;
+}
+
+function formatPptxSlideText(slides = []) {
+  return normalizeExtractedText((Array.isArray(slides) ? slides : [])
+    .map((slide) => `Slide ${slide.pageNumber}\n${slide.text || ""}`.trim())
+    .filter(Boolean)
+    .join("\n\n"));
+}
+
+async function extractPptxText(buffer) {
+  return formatPptxSlideText(await extractPptxSlides(buffer));
 }
 
 function extractSpreadsheetText(buffer) {
@@ -1109,7 +1662,7 @@ function extractSpreadsheetText(buffer) {
   );
 }
 
-async function extractFileText(file) {
+async function extractFileText(file, options = {}) {
   const extension = detectExtension(file.originalname);
   const buffer = file.buffer;
 
@@ -1130,10 +1683,34 @@ async function extractFileText(file) {
   }
 
   if (extension === ".pptx") {
+    const slides = await extractPptxSlides(buffer);
+    let slideImages = [];
+    let imageNote = "";
+    if (options.includeSlideImages !== false) {
+      try {
+        slideImages = await exportPptxSlideImages(buffer, file.originalname);
+      } catch (error) {
+        imageNote = `；原页截图导出失败：${String(error?.message || error).slice(0, 120)}`;
+      }
+    }
+    const imageByPage = new Map(slideImages.map((item) => [Number(item.pageNumber), item]));
+    const slidePages = slides.map((slide) => {
+      const image = imageByPage.get(Number(slide.pageNumber));
+      return {
+        pageNumber: slide.pageNumber,
+        title: slide.title,
+        text: slide.text,
+        body: slide.body,
+        slideImage: image?.previewUrl || "",
+        referenceImages: image?.previewUrl ? [image.previewUrl] : [],
+      };
+    });
     return {
-      extractedText: await extractPptxText(buffer),
+      extractedText: formatPptxSlideText(slides),
+      slidePages,
+      slideImages,
       parseStatus: "parsed",
-      parseNote: "已提取 PPTX 各页文本。",
+      parseNote: `已提取 PPTX 各页文本${slideImages.length ? `，并导出 ${slideImages.length} 张原页参考图。` : imageNote || "。"}`,
     };
   }
 
@@ -1621,12 +2198,67 @@ app.post("/api/test-image-key", async (req, res) => {
         message: "请先填写 OpenAI Image API Key。",
       });
     }
-    return res.json({
-      ok: true,
-      provider: "openai-image",
-      fallbackProvider: resolveWhatAiImageApiKey(whatAiImageApiKey) ? "whatai-image" : "",
-      message: `OpenAI 图片接口 Key 已填写，模型 ${model} 将使用 ${resolveOpenAiImageEndpoint(openAiImageBaseUrl)}。`,
-    });
+    const imageEndpoint = resolveOpenAiImageEndpoint(openAiImageBaseUrl);
+    if (isGrsaiDrawEndpoint(imageEndpoint)) {
+      return res.json({
+        ok: true,
+        provider: "grsai-draw",
+        fallbackProvider: resolveWhatAiImageApiKey(whatAiImageApiKey) ? "whatai-image" : "",
+        message: `Grsai 图片接口已配置，模型 ${model} 将使用 ${imageEndpoint}。该接口没有非生图校验端点，首次生成时会完成真实验证。`,
+      });
+    }
+
+    const modelsEndpoint = resolveOpenAiModelsEndpoint(openAiImageBaseUrl);
+    try {
+      const parsed = await requestJsonViaFetch({
+        method: "GET",
+        url: modelsEndpoint,
+        headers: {
+          Authorization: `Bearer ${effectiveKey}`,
+        },
+      });
+      if (!parsed.ok) {
+        const error = createImageUpstreamError({
+          provider: "openai-image",
+          endpoint: modelsEndpoint,
+          status: parsed.status || 500,
+          model,
+          data: parsed.data,
+          fallback: "OpenAI Image API Key 验证失败。",
+        });
+        return res.status(error.status || 500).json({
+          code: "OpenAiImageKeyTestFailed",
+          message: error.message || "OpenAI Image API Key 验证失败。",
+          details: buildPublicImageErrorDetails(error),
+        });
+      }
+
+      const listedModels = Array.isArray(parsed.data?.data)
+        ? parsed.data.data.map((item) => String(item?.id || item || "").trim()).filter(Boolean)
+        : [];
+      const modelListed = !listedModels.length || listedModels.includes(model);
+      return res.json({
+        ok: true,
+        provider: "openai-image",
+        fallbackProvider: resolveWhatAiImageApiKey(whatAiImageApiKey) ? "whatai-image" : "",
+        modelListed,
+        message: modelListed
+          ? `OpenAI 图片接口 Key 可用，模型 ${model} 将使用 ${imageEndpoint}。`
+          : `OpenAI 图片接口 Key 可用，但模型列表未声明 ${model}；生成时仍将使用 ${imageEndpoint}。`,
+      });
+    } catch (error) {
+      if (!error.provider) {
+        error.provider = "openai-image";
+        error.endpoint = sanitizeLogUrl(modelsEndpoint);
+        error.model = model;
+        logImageUpstreamError(error);
+      }
+      return res.status(error.status || 500).json({
+        code: "OpenAiImageKeyTestFailed",
+        message: error.message || "OpenAI Image API Key 验证失败。",
+        details: buildPublicImageErrorDetails(error),
+      });
+    }
   }
 
   // DashScope Key 测试
@@ -1699,6 +2331,7 @@ app.post("/api/generate", async (req, res, next) => {
     return res.status(error.status || 500).json({
       code: "OpenAiImageRequestFailed",
       message: error.message || "调用 OpenAI Image 失败。",
+      details: buildPublicImageErrorDetails(error),
     });
   }
 });
@@ -1966,6 +2599,7 @@ app.post("/api/research-supplements", async (req, res) => {
 
 app.post("/api/files/parse", upload.array("files", 20), async (req, res) => {
   const files = Array.isArray(req.files) ? req.files : [];
+  const includeSlideImages = String(req.body?.includeSlideImages ?? "1").trim() !== "0";
 
   if (!files.length) {
     return res.status(400).json({
@@ -1980,7 +2614,7 @@ app.post("/api/files/parse", upload.array("files", 20), async (req, res) => {
       const originalname = normalizeUploadedFileName(file.originalname);
       const normalizedFile = { ...file, originalname };
       try {
-        const parsed = await extractFileText(normalizedFile);
+        const parsed = await extractFileText(normalizedFile, { includeSlideImages });
         const extractedText = normalizeExtractedText(parsed.extractedText || "");
         parsedFiles.push({
           id: crypto.randomUUID(),
@@ -1996,6 +2630,8 @@ app.post("/api/files/parse", upload.array("files", 20), async (req, res) => {
           assetId: parsed.assetId || "",
           assetFileName: parsed.assetFileName || "",
           previewUrl: parsed.previewUrl || "",
+          slidePages: Array.isArray(parsed.slidePages) ? parsed.slidePages : [],
+          slideImages: Array.isArray(parsed.slideImages) ? parsed.slideImages : [],
         });
       } catch (error) {
         parsedFiles.push({
@@ -2297,18 +2933,19 @@ function openInDefaultBrowser(url) {
 
 function startServer(port, options = {}) {
   const openBrowser = options.openBrowser ?? (process.pkg && process.env.PPTGEN_NO_BROWSER !== "1");
+  const host = options.host || HOST;
 
   return new Promise((resolve, reject) => {
     let currentPort = Number(port) || 3000;
 
     const tryListen = () => {
-      const server = app.listen(currentPort, () => {
+      const server = app.listen(currentPort, host, () => {
         ACTIVE_PORT = Number(currentPort);
-        const url = `http://localhost:${currentPort}`;
+        const url = `http://${host}:${currentPort}`;
         console.log(`PPTGEN is running at ${url}`);
         console.log(`Generated images will be saved to ${GENERATED_DIR}`);
         if (openBrowser) openInDefaultBrowser(url);
-        resolve({ app, server, port: currentPort, url });
+        resolve({ app, server, port: currentPort, host, url });
       });
 
       server.on("error", (error) => {

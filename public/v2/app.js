@@ -1,14 +1,17 @@
 const STORAGE_KEY = "ppt-studio-v2-mainline";
 const SETTINGS_STORAGE_KEY = `${STORAGE_KEY}:settings`;
 const DEFAULT_REGION = "beijing";
-const PPT_MODEL = "gpt-image-2";
+const PPT_MODEL = "gpt-image-2-vip";
 const OPENAI_WORKFLOW_MODELS = new Set([
   "gpt-image-2",
+  "gpt-image-2-vip",
 ]);
-const OPENAI_IMAGE_DEFAULT_HOST = "https://api.bltcy.ai";
+const OPENAI_IMAGE_DEFAULT_HOST = "https://grsai.dakka.com.cn/v1/api/generate";
 const MAX_REVISE_BOXES = 2;
 const SLIDE_EMPTY_DEFAULT_TEXT = "生成前这里是空白画布。生成后，结果图会自动成为这页的底图。";
 const SLIDE_IMAGE_BROKEN_TEXT = "图片文件或链接已失效，无法显示。可以切换历史版本，或重新生成这一页。";
+const MAX_PAGE_REFERENCE_IMAGES = 3;
+const MAX_PAGE_REFERENCE_IMAGE_BYTES = 12 * 1024 * 1024;
 
 const DEFAULT_PREFERENCES = {
   styleMode: "business",
@@ -163,6 +166,7 @@ const state = {
 
 const el = {};
 const activeRequests = new Map();
+let referenceCropState = null;
 const CANCEL_LABELS = {
   theme: "已取消生成风格。",
   split: "已取消拆分。",
@@ -218,6 +222,10 @@ function cacheElements() {
     "pickReferenceFilesBtn",
     "referenceFilesInput",
     "referenceFilesList",
+    "extractedImportMode",
+    "pickExtractedImportBtn",
+    "extractedImportInput",
+    "extractedImportHint",
     "runSplitBtn",
     "skipSplitBtn",
     "cancelSplitBtn",
@@ -242,6 +250,10 @@ function cacheElements() {
     "cancelRepreparePageBtn",
     "batchGenerateReadyBtn",
     "cancelBatchGenerateBtn",
+    "uploadPageReferenceBtn",
+    "pageReferenceInput",
+    "clearPageReferenceBtn",
+    "pageReferenceStrip",
     "uploadOverlayBtn",
     "overlayFileInput",
     "clearOverlayBtn",
@@ -271,6 +283,14 @@ function cacheElements() {
     "pageImageModalImg",
     "savePageImageModalBtn",
     "closePageImageModalBtn",
+    "referenceCropModal",
+    "referenceCropTitle",
+    "referenceCropStage",
+    "referenceCropImage",
+    "referenceCropBox",
+    "referenceCropSaveNewBtn",
+    "referenceCropReplaceBtn",
+    "referenceCropCloseBtn",
     "revisePrevBtn",
     "reviseNextBtn",
     "reviseImportBtn",
@@ -525,8 +545,46 @@ function syncActiveProjectSnapshot() {
   }
 }
 
+function isPersistentImageSrc(src) {
+  const value = String(src || "").trim();
+  return /^https?:\/\//i.test(value) || value.startsWith("/generated-images/") || value.startsWith("/reference-assets/");
+}
+
+function normalizePageReferenceImages(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .map((item) => {
+      if (typeof item === "string") {
+        return {
+          id: uid(),
+          name: "原页参考图",
+          src: item.trim(),
+          naturalWidth: 0,
+          naturalHeight: 0,
+        };
+      }
+      return {
+        id: String(item?.id || uid()),
+        name: String(item?.name || "原页参考图"),
+        src: String(item?.src || item?.url || "").trim(),
+        naturalWidth: Number(item?.naturalWidth || 0) || 0,
+        naturalHeight: Number(item?.naturalHeight || 0) || 0,
+      };
+    })
+    .filter((item) => item.src)
+    .slice(0, MAX_PAGE_REFERENCE_IMAGES);
+}
+
+function getPageReferenceSources(draft) {
+  return normalizePageReferenceImages(draft?.referenceImages || [])
+    .map((item) => item.src)
+    .filter(Boolean)
+    .slice(0, MAX_PAGE_REFERENCE_IMAGES);
+}
+
 function serializePageDraftsForStorage() {
+  const pagesById = new Map((state.workflowJob?.pages || []).map((page) => [page.id, page]));
   return Object.fromEntries(Object.entries(state.pageDrafts).map(([pageId, draft]) => {
+    const page = pagesById.get(pageId);
     const editablePrompt = getEditablePagePromptFromValues(draft.sharedPrompt, draft.extraPrompt, draft.pageStylePrompt);
     return [
       pageId,
@@ -538,8 +596,9 @@ function serializePageDraftsForStorage() {
         sourceOnscreenContent: draft.sourceOnscreenContent || "",
         sharedPrompt: editablePrompt,
         extraPrompt: editablePrompt,
-        pageStylePrompt: getEffectivePageStylePrompt(editablePrompt),
+        pageStylePrompt: page?.promptOnlyImport ? editablePrompt : getEffectivePageStylePrompt(editablePrompt),
         overlays: (draft.overlays || []).filter((item) => /^https?:\/\//i.test(item.src) || item.src.startsWith("/generated-images/")),
+        referenceImages: normalizePageReferenceImages(draft.referenceImages).filter((item) => isPersistentImageSrc(item.src)),
       },
     ];
   }));
@@ -888,10 +947,6 @@ function usingSimpleWorkflowUi() {
   return usingGptSimpleWorkflow() || !hasThemeWorkflowUi();
 }
 
-function usingGrsaiWorkflowModel() {
-  return false;
-}
-
 function usingHostedWorkflowModel() {
   const model = getCurrentWorkflowImageModel();
   return OPENAI_WORKFLOW_MODELS.has(model);
@@ -913,6 +968,26 @@ function normalizeOpenAiImageBaseUrl(value) {
     .split(/[\n,;]+/)
     .map((item) => item.trim().replace(/\/+$/, ""))
     .filter(Boolean)
+    .map((item) => {
+      if (
+        item === "https://api.openai.com"
+        || item === "https://api.openai.com/v1/images/generations"
+        || item === "https://api.bltcy.ai"
+        || item === "https://api.bltcy.ai/v1/images/generations"
+      ) {
+        return OPENAI_IMAGE_DEFAULT_HOST;
+      }
+      if (/^https:\/\/(?:grsaiapi\.com|grsai\.dakka\.com\.cn)$/i.test(item)) {
+        return `${item}/v1/api/generate`;
+      }
+      if (/^https:\/\/(?:grsaiapi\.com|grsai\.dakka\.com\.cn)\/v1$/i.test(item)) {
+        return `${item}/api/generate`;
+      }
+      if (/^https:\/\/(?:grsaiapi\.com|grsai\.dakka\.com\.cn)\/v1\/draw\/completions$/i.test(item)) {
+        return item.replace(/\/v1\/draw\/completions$/i, "/v1/api/generate");
+      }
+      return item;
+    })
     .map((item) => (item === "https://api.openai.com" || item === "https://api.openai.com/v1/images/generations")
       ? OPENAI_IMAGE_DEFAULT_HOST
       : item);
@@ -928,7 +1003,7 @@ function getCurrentHostedImageKeyPayload() {
 }
 
 const WORKFLOW_IMAGE_MODEL_OPTIONS = [
-    `<option value="gpt-image-2">GPT Image 2</option>`,
+    `<option value="gpt-image-2-vip">GPT Image 2 VIP</option>`,
 ];
 
 function getWorkflowModelSelects() {
@@ -972,7 +1047,7 @@ function syncQuickKeyPlaceholders() {
     element.placeholder = isConfigured ? `${baseText}；本机已配置可留空` : baseText;
   };
   setPlaceholder(el.quickApiKey, "用于内容拆分和风格匹配", ck.dashscope);
-  setPlaceholder(el.quickOpenAiImageApiKey, "用于 gpt-image-2", ck.openAiImage);
+  setPlaceholder(el.quickOpenAiImageApiKey, "用于 gpt-image-2-vip", ck.openAiImage);
 }
 
 function syncWorkflowModeUi() {
@@ -982,6 +1057,14 @@ function syncWorkflowModeUi() {
   document.body.dataset.workflowProvider = isGpt ? "openai" : "standard";
   if (el.quickOpenAiImageKeyField) el.quickOpenAiImageKeyField.hidden = !isSimple;
   if (el.quickOpenAiImageBaseUrlField) el.quickOpenAiImageBaseUrlField.hidden = !isSimple;
+  if (el.quickOpenAiImageApiKey) el.quickOpenAiImageApiKey.placeholder = "for gpt-image-2-vip";
+  if (el.openAiImageApiKey) el.openAiImageApiKey.placeholder = "for gpt-image-2-vip";
+  if (el.quickOpenAiImageBaseUrl) el.quickOpenAiImageBaseUrl.placeholder = OPENAI_IMAGE_DEFAULT_HOST;
+  if (el.openAiImageBaseUrl) el.openAiImageBaseUrl.placeholder = OPENAI_IMAGE_DEFAULT_HOST;
+  const openAiImageBaseUrlHint = document.querySelector("#openAiImageBaseUrlField .field-hint");
+  if (openAiImageBaseUrlHint) {
+    openAiImageBaseUrlHint.textContent = "Default Grsai endpoint: /v1/api/generate; hosts like https://grsaiapi.com are also accepted.";
+  }
   document.querySelectorAll('[data-step="theme"]').forEach((button) => {
     button.disabled = isSimple;
     button.classList.toggle("is-disabled", isSimple);
@@ -1086,19 +1169,27 @@ function getEditablePagePromptFromValues(sharedPrompt = "", extraPrompt = "", pa
 }
 
 function getEditablePagePromptFromPage(page) {
-  return getEditablePagePromptFromValues(
+  const editablePrompt = getEditablePagePromptFromValues(
     page?.sharedPrompt,
     page?.extraPrompt,
     page?.pageStylePrompt,
     page?.promptTrace?.finalImage?.extraPrompt
   );
+  if (!page?.promptOnlyImport) return editablePrompt;
+  const directPrompt = String(page?.directImagePrompt || "").trim();
+  if (!directPrompt) return editablePrompt;
+  if (!editablePrompt) return directPrompt;
+  if (directPrompt.includes(editablePrompt) && editablePrompt.length < directPrompt.length * 0.5) {
+    return directPrompt;
+  }
+  return editablePrompt;
 }
 
-function applyDraftPromptForGeneration(draft, userPrompt) {
+function applyDraftPromptForGeneration(draft, userPrompt, page = null) {
   const editablePrompt = stripCurrentGptStylePrompt(userPrompt);
   draft.sharedPrompt = editablePrompt;
   draft.extraPrompt = editablePrompt;
-  draft.pageStylePrompt = getEffectivePageStylePrompt(editablePrompt);
+  draft.pageStylePrompt = page?.promptOnlyImport ? editablePrompt : getEffectivePageStylePrompt(editablePrompt);
   return editablePrompt;
 }
 
@@ -1121,7 +1212,7 @@ function sanitizeRecoveredWorkflowJob(job) {
     normalizedPage.extraPrompt = editablePrompt;
     normalizedPage.visualElementsPrompt = String(normalizedPage.visualElementsPrompt || "");
     normalizedPage.visualElementsDisplay = String(normalizedPage.visualElementsDisplay || normalizedPage.visualElementsPrompt || "");
-    normalizedPage.pageStylePrompt = String(normalizedPage.pageStylePrompt || "");
+    normalizedPage.pageStylePrompt = normalizedPage.promptOnlyImport ? editablePrompt : String(normalizedPage.pageStylePrompt || "");
     normalizedPage.baseImage = String(normalizedPage.baseImage || "");
     normalizedPage.resultImages = Array.from(new Set([
       normalizedPage.baseImage,
@@ -1217,7 +1308,8 @@ function ensurePageDraft(page) {
       sourceOnscreenContent: composeOnscreenContentFromEditors(canonicalSplit.title, canonicalSplit.body),
       sharedPrompt: editablePrompt,
       extraPrompt: editablePrompt,
-      pageStylePrompt: page.pageStylePrompt || "",
+      pageStylePrompt: page.promptOnlyImport ? editablePrompt : (page.pageStylePrompt || ""),
+      referenceImages: normalizePageReferenceImages(page.referenceImages || []),
       overlays: [],
       drawingLayer: "",
     };
@@ -1256,10 +1348,11 @@ function ensurePageDraft(page) {
   );
   state.pageDrafts[page.id].sharedPrompt = normalizedPrompt;
   state.pageDrafts[page.id].extraPrompt = normalizedPrompt;
-  state.pageDrafts[page.id].pageStylePrompt = getEffectivePageStylePrompt(normalizedPrompt);
+  state.pageDrafts[page.id].pageStylePrompt = page.promptOnlyImport ? normalizedPrompt : getEffectivePageStylePrompt(normalizedPrompt);
   if (!Array.isArray(state.pageDrafts[page.id].overlays)) {
     state.pageDrafts[page.id].overlays = [];
   }
+  state.pageDrafts[page.id].referenceImages = normalizePageReferenceImages(state.pageDrafts[page.id].referenceImages || page.referenceImages || []);
   if (typeof state.pageDrafts[page.id].drawingLayer !== "string") {
     state.pageDrafts[page.id].drawingLayer = "";
   }
@@ -1691,6 +1784,167 @@ function saveModalImage() {
   saveImageUrl(el.pageImageModalImg?.src || "", "pptgen-image.png");
 }
 
+function getCurrentPageReference(referenceId) {
+  const page = getSelectedPage();
+  const draft = ensurePageDraft(page);
+  if (!page || !draft) return { page: null, draft: null, references: [], reference: null, index: -1 };
+  const references = normalizePageReferenceImages(draft.referenceImages);
+  const index = references.findIndex((item) => item.id === referenceId);
+  return { page, draft, references, reference: references[index] || null, index };
+}
+
+function syncReferenceCropActions() {
+  const hasCrop = Boolean(referenceCropState?.crop && referenceCropState.crop.w >= 2 && referenceCropState.crop.h >= 2);
+  if (el.referenceCropSaveNewBtn) el.referenceCropSaveNewBtn.disabled = !hasCrop;
+  if (el.referenceCropReplaceBtn) el.referenceCropReplaceBtn.disabled = !hasCrop;
+}
+
+function renderReferenceCropBox() {
+  const box = el.referenceCropBox;
+  const crop = referenceCropState?.crop;
+  if (!box) return;
+  if (!crop) {
+    box.hidden = true;
+    syncReferenceCropActions();
+    return;
+  }
+  box.hidden = false;
+  box.style.left = `${crop.x}%`;
+  box.style.top = `${crop.y}%`;
+  box.style.width = `${crop.w}%`;
+  box.style.height = `${crop.h}%`;
+  syncReferenceCropActions();
+}
+
+function openReferenceCrop(referenceId) {
+  const { reference } = getCurrentPageReference(referenceId);
+  if (!reference || !el.referenceCropModal || !el.referenceCropImage) {
+    setStatus("未找到可截取的参考图。", "error");
+    return;
+  }
+  referenceCropState = {
+    referenceId,
+    sourceName: reference.name || "参考图",
+    crop: null,
+  };
+  if (el.referenceCropTitle) el.referenceCropTitle.textContent = `截取参考区域 · ${reference.name || "参考图"}`;
+  el.referenceCropImage.src = reference.src;
+  el.referenceCropModal.hidden = false;
+  document.body.style.overflow = "hidden";
+  renderReferenceCropBox();
+}
+
+function closeReferenceCropModal() {
+  if (!el.referenceCropModal || !el.referenceCropImage) return;
+  el.referenceCropModal.hidden = true;
+  el.referenceCropImage.src = "";
+  referenceCropState = null;
+  renderReferenceCropBox();
+  if (el.pageImageModal?.hidden !== false) {
+    document.body.style.overflow = "";
+  }
+}
+
+function getReferenceCropPoint(event) {
+  const rect = el.referenceCropStage?.getBoundingClientRect();
+  if (!rect || !rect.width || !rect.height) return { x: 0, y: 0 };
+  return {
+    x: clamp(((event.clientX - rect.left) / rect.width) * 100, 0, 100),
+    y: clamp(((event.clientY - rect.top) / rect.height) * 100, 0, 100),
+  };
+}
+
+function beginReferenceCropSelection(event) {
+  if (!referenceCropState || !el.referenceCropStage) return;
+  event.preventDefault();
+  const start = getReferenceCropPoint(event);
+  const move = (moveEvent) => {
+    const current = getReferenceCropPoint(moveEvent);
+    const left = Math.min(start.x, current.x);
+    const top = Math.min(start.y, current.y);
+    referenceCropState.crop = {
+      x: left,
+      y: top,
+      w: Math.max(0, Math.abs(current.x - start.x)),
+      h: Math.max(0, Math.abs(current.y - start.y)),
+    };
+    renderReferenceCropBox();
+  };
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    if (referenceCropState?.crop && (referenceCropState.crop.w < 2 || referenceCropState.crop.h < 2)) {
+      referenceCropState.crop = null;
+      renderReferenceCropBox();
+      setStatus("选区太小，请重新框选。", "error");
+    }
+  };
+  referenceCropState.crop = { x: start.x, y: start.y, w: 0, h: 0 };
+  renderReferenceCropBox();
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+
+function buildReferenceCropDataUrl() {
+  const image = el.referenceCropImage;
+  const crop = referenceCropState?.crop;
+  if (!image || !crop || !image.naturalWidth || !image.naturalHeight) {
+    throw new Error("参考图尚未加载完成。");
+  }
+  const sx = Math.max(0, Math.floor((crop.x / 100) * image.naturalWidth));
+  const sy = Math.max(0, Math.floor((crop.y / 100) * image.naturalHeight));
+  const sw = Math.max(1, Math.min(image.naturalWidth - sx, Math.ceil((crop.w / 100) * image.naturalWidth)));
+  const sh = Math.max(1, Math.min(image.naturalHeight - sy, Math.ceil((crop.h / 100) * image.naturalHeight)));
+  const canvas = document.createElement("canvas");
+  canvas.width = sw;
+  canvas.height = sh;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(image, sx, sy, sw, sh, 0, 0, sw, sh);
+  return {
+    src: canvas.toDataURL("image/png"),
+    width: sw,
+    height: sh,
+  };
+}
+
+function saveReferenceCrop(mode = "new") {
+  if (!referenceCropState?.referenceId) return;
+  const { draft, references, reference, index } = getCurrentPageReference(referenceCropState.referenceId);
+  if (!draft || !reference || index < 0) {
+    setStatus("参考图已经不存在，请重新上传。", "error");
+    closeReferenceCropModal();
+    return;
+  }
+  if (mode !== "replace" && references.length >= MAX_PAGE_REFERENCE_IMAGES) {
+    setStatus(`最多保留 ${MAX_PAGE_REFERENCE_IMAGES} 张参考图，请先删除一张或选择替换原图。`, "error");
+    return;
+  }
+  try {
+    const crop = buildReferenceCropDataUrl();
+    const baseName = String(reference.name || "参考图").replace(/\.[^.]+$/, "");
+    const cropped = {
+      id: mode === "replace" ? reference.id : uid(),
+      name: `${baseName}-选区.png`,
+      src: crop.src,
+      naturalWidth: crop.width,
+      naturalHeight: crop.height,
+    };
+    if (mode === "replace") {
+      references[index] = cropped;
+    } else {
+      references.push(cropped);
+    }
+    draft.referenceImages = references;
+    closeReferenceCropModal();
+    renderPageReferenceStrip();
+    saveState();
+    syncCurrentPageGenerateUi();
+    setStatus(mode === "replace" ? "已用选区替换参考图。" : "已新增选区参考图。", "success");
+  } catch (error) {
+    setStatus(error.message || "截取参考图失败。", "error");
+  }
+}
+
 function buildWorkflowExportPayload() {
   const pages = Array.isArray(state.workflowJob?.pages) ? state.workflowJob.pages : [];
   return {
@@ -1815,6 +2069,7 @@ function renderArtboard() {
     el.slideEmptyState.textContent = SLIDE_EMPTY_DEFAULT_TEXT;
     el.slideEmptyState.hidden = false;
     el.overlayLayer.innerHTML = "";
+    renderPageReferenceStrip();
     renderPageDrawingLayer();
     return;
   }
@@ -1877,6 +2132,7 @@ function renderArtboard() {
     const overlayId = node.dataset.overlayResizeId;
     node.addEventListener("pointerdown", (event) => beginOverlayResize(event, overlayId));
   });
+  renderPageReferenceStrip();
 }
 
 function resizePageDrawCanvas(forceRedraw = false) {
@@ -2179,11 +2435,23 @@ async function exportCurrentArtboard() {
   }
 }
 
+function formatApiErrorMessage(data, fallback = "请求失败。") {
+  const message = data?.message || fallback;
+  const details = data?.details || {};
+  const detailParts = [
+    details.provider,
+    details.status ? `HTTP ${details.status}` : "",
+    details.upstreamCode ? `code ${details.upstreamCode}` : "",
+    details.endpoint,
+  ].filter(Boolean);
+  return detailParts.length ? `${message}（${detailParts.join(" · ")}）` : message;
+}
+
 async function apiJson(url, options = {}) {
   const response = await fetch(url, options);
   const data = await response.json();
   if (!response.ok || data.code) {
-    const error = new Error(data.message || "请求失败。");
+    const error = new Error(formatApiErrorMessage(data));
     error.code = data.code || "";
     error.status = response.status;
     error.data = data;
@@ -2224,6 +2492,7 @@ async function handleReferenceFiles(event) {
   if (!files.length) return;
   const formData = new FormData();
   files.forEach((file) => formData.append("files", file));
+  formData.append("includeSlideImages", "1");
   setStatus(`正在解析 ${files.length} 个参考文件...`, "running");
   try {
     const response = await fetch("/api/files/parse", { method: "POST", body: formData });
@@ -2240,11 +2509,236 @@ async function handleReferenceFiles(event) {
   }
 }
 
+function normalizeExtractedImportModeValue(value) {
+  return String(value || "").trim() === "plain" ? "plain" : "with_constraints";
+}
+
+function buildExtractedImportPayload(file, text) {
+  const rawName = String(file?.name || "提取稿").trim();
+  const projectTitle = rawName.replace(/\.[^.]+$/, "") || "PPT 翻新提取稿";
+  const mode = normalizeExtractedImportModeValue(el.extractedImportMode?.value);
+  const trimmed = String(text || "").trim();
+  if (!trimmed) {
+    throw new Error("提取稿文件为空。");
+  }
+
+  const parsed = rawName.toLowerCase().endsWith(".json") ? safeJsonParse(trimmed) : null;
+  if (Array.isArray(parsed)) {
+    return {
+      projectTitle,
+      contentMode: mode,
+      preferences: state.preferences,
+      decorationLevel: state.decorationLevel,
+      pages: parsed,
+    };
+  }
+  if (parsed && typeof parsed === "object") {
+    return {
+      projectTitle: String(parsed.projectTitle || parsed.title || projectTitle),
+      contentMode: normalizeExtractedImportModeValue(parsed.contentMode || parsed.importMode || mode),
+      preferences: parsed.preferences || state.preferences,
+      decorationLevel: parsed.decorationLevel || state.decorationLevel,
+      pages: Array.isArray(parsed.pages) ? parsed.pages : undefined,
+      structuredText: parsed.structuredText || parsed.markdown || parsed.text || undefined,
+    };
+  }
+  return {
+    projectTitle,
+    contentMode: mode,
+    preferences: state.preferences,
+    decorationLevel: state.decorationLevel,
+    structuredText: trimmed,
+  };
+}
+
+function splitPptxSlideText(slide, fallbackPageNumber) {
+  const pageNumber = Number(slide?.pageNumber || fallbackPageNumber || 1);
+  const rawText = String(slide?.text || slide?.extractedText || slide?.body || "").replace(/\r/g, "").trim();
+  const lines = rawText.split("\n").map((line) => line.trim()).filter(Boolean);
+  const explicitTitle = String(slide?.title || "").trim();
+  const title = explicitTitle || lines[0] || `第${pageNumber}页`;
+  const body = (String(slide?.body || "").trim() || lines.slice(explicitTitle ? 0 : 1).join("\n") || title).trim();
+  return { pageNumber, title, body };
+}
+
+function buildPptxImportPages(parsedFile) {
+  const slidePages = Array.isArray(parsedFile?.slidePages) ? parsedFile.slidePages : [];
+  return slidePages.map((slide, index) => {
+    const { pageNumber, title, body } = splitPptxSlideText(slide, index + 1);
+    return {
+      pageNumber,
+      title,
+      aiPrompt: [
+        `标题：${title}`,
+        `上屏内容：${body}`,
+        "科研绘图结构要求：如需保真原图中的局部结构、箭头、公式、符号或标注关系，请手动裁剪对应区域作为参考图；不要默认使用整页参考图。",
+      ].join("\n"),
+    };
+  }).filter((page) => page.title || page.aiPrompt);
+}
+
+async function buildPptxExtractedImportPayload(file, signal) {
+  const formData = new FormData();
+  formData.append("files", file);
+  formData.append("includeSlideImages", "1");
+  const response = await fetch("/api/files/parse", { method: "POST", body: formData, signal });
+  const data = await response.json();
+  if (!response.ok || data.code) throw new Error(data.message || "PPTX 解析失败。");
+  const parsedFile = data.files?.[0];
+  if (!parsedFile || parsedFile.parseStatus === "error") {
+    throw new Error(parsedFile?.parseNote || "PPTX 解析失败。");
+  }
+  const pages = buildPptxImportPages(parsedFile);
+  if (!pages.length) {
+    throw new Error("没有从 PPTX 中解析到可导入的页面。");
+  }
+  const rawName = String(file?.name || parsedFile.name || "PPT 翻新提取稿").trim();
+  const projectTitle = rawName.replace(/\.[^.]+$/, "") || "PPT 翻新提取稿";
+  return {
+    projectTitle,
+    contentMode: normalizeExtractedImportModeValue(el.extractedImportMode?.value),
+    preferences: state.preferences,
+    decorationLevel: state.decorationLevel,
+    pages,
+  };
+}
+
+function applyImportedWorkflowJob(data) {
+  stopWorkflowPolling();
+  state.workflowJobId = data.jobId;
+  state.workflowJob = mergeWorkflowJobWithLocalImages(data.job, state.workflowJob);
+  state.themeDefinition = sanitizeRecoveredThemeDefinition(data.job?.themeDefinition || null);
+  state.themeConfirmed = true;
+  state.pageDrafts = {};
+  state.selectedPageId = data.job?.pages?.[0]?.id || "";
+  ensureSelectedPage();
+  syncPageDraftFromPage(getSelectedPage(), { force: true });
+  renderPagesWorkbench();
+  renderThemePromptModules();
+  updateThemeView();
+  switchSmartStep("pages");
+}
+
+async function handleExtractedImportFile(event) {
+  const file = Array.from(event.target.files || [])[0];
+  if (!file) return;
+  const actionKey = "importExtracted";
+  const signal = startCancelableAction(actionKey, el.pickExtractedImportBtn, null, "导入中...");
+  setStatus(`正在导入提取稿：${file.name}`, "running");
+  try {
+    state.preferences = getCurrentPreferences();
+    const isPptx = /\.pptx$/i.test(String(file.name || ""));
+    const payload = isPptx
+      ? await buildPptxExtractedImportPayload(file, signal)
+      : buildExtractedImportPayload(file, await file.text());
+    const data = await apiJson("/api/workflow/import-extracted", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal,
+      body: JSON.stringify(payload),
+    });
+    applyImportedWorkflowJob(data);
+    const pageCount = data.importDiagnostics?.pageCount || data.job?.totalPages || 0;
+    setStatus(`已导入 ${pageCount} 页提取稿${isPptx ? "，参考图请按需手动上传并裁剪局部" : ""}，可以逐页生成。`, "success");
+    saveState();
+  } catch (error) {
+    if (!isAbortError(error)) {
+      setStatus(error.message || "导入提取稿失败。", "error");
+    }
+  } finally {
+    finishCancelableAction(actionKey);
+    event.target.value = "";
+  }
+}
+
 function stopWorkflowPolling() {
   if (state.workflowPollTimer) {
     clearInterval(state.workflowPollTimer);
     state.workflowPollTimer = null;
   }
+}
+
+function renderPageReferenceStrip() {
+  if (!el.pageReferenceStrip) return;
+  const page = getSelectedPage();
+  const draft = page ? ensurePageDraft(page) : null;
+  const references = normalizePageReferenceImages(draft?.referenceImages || []);
+  if (!page || !references.length) {
+    el.pageReferenceStrip.innerHTML = `<div class="inline-hint compact-hint">未上传原页参考</div>`;
+    return;
+  }
+  el.pageReferenceStrip.innerHTML = references.map((item, index) => `
+    <div class="page-reference-item" data-reference-id="${escapeHtml(item.id)}">
+      <img src="${escapeHtml(item.src)}" alt="${escapeHtml(item.name)}" data-crop-page-reference="${escapeHtml(item.id)}" />
+      <span>${escapeHtml(`${index + 1}. ${item.name}`)}</span>
+      <div class="page-reference-actions">
+        <button class="mini-action-btn" type="button" data-crop-page-reference="${escapeHtml(item.id)}">选区</button>
+        <button class="icon-btn file-delete-btn" type="button" data-remove-page-reference="${escapeHtml(item.id)}" aria-label="删除参考图">×</button>
+      </div>
+    </div>
+  `).join("");
+  el.pageReferenceStrip.querySelectorAll("[data-crop-page-reference]").forEach((node) => {
+    node.addEventListener("click", () => openReferenceCrop(node.dataset.cropPageReference));
+  });
+  el.pageReferenceStrip.querySelectorAll("[data-remove-page-reference]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const selected = getSelectedPage();
+      const selectedDraft = ensurePageDraft(selected);
+      if (!selectedDraft) return;
+      selectedDraft.referenceImages = normalizePageReferenceImages(selectedDraft.referenceImages)
+        .filter((item) => item.id !== button.dataset.removePageReference);
+      renderPageReferenceStrip();
+      saveState();
+      syncCurrentPageGenerateUi();
+    });
+  });
+}
+
+async function handlePageReferenceFiles(event) {
+  const page = getSelectedPage();
+  const draft = ensurePageDraft(page);
+  const files = Array.from(event.target.files || []);
+  if (!page || !draft || !files.length) return;
+  const nextReferences = normalizePageReferenceImages(draft.referenceImages);
+  for (const file of files) {
+    if (nextReferences.length >= MAX_PAGE_REFERENCE_IMAGES) break;
+    if (!/^image\//i.test(file.type || "")) {
+      setStatus(`已跳过非图片文件：${file.name}`, "error");
+      continue;
+    }
+    if (file.size > MAX_PAGE_REFERENCE_IMAGE_BYTES) {
+      setStatus(`参考图过大：${file.name}，请控制在 12MB 以内。`, "error");
+      continue;
+    }
+    try {
+      const src = await fileToDataUrl(file);
+      const img = await loadImage(src);
+      nextReferences.push({
+        id: uid(),
+        name: file.name || "原页参考图",
+        src,
+        naturalWidth: img.naturalWidth,
+        naturalHeight: img.naturalHeight,
+      });
+    } catch (error) {
+      setStatus(error.message || "原页参考图上传失败。", "error");
+    }
+  }
+  draft.referenceImages = nextReferences;
+  renderPageReferenceStrip();
+  saveState();
+  syncCurrentPageGenerateUi();
+  event.target.value = "";
+}
+
+function clearCurrentPageReferences() {
+  const page = getSelectedPage();
+  const draft = ensurePageDraft(page);
+  if (!draft) return;
+  draft.referenceImages = [];
+  renderPageReferenceStrip();
+  saveState();
+  syncCurrentPageGenerateUi();
 }
 
 async function handleOverlayFiles(event) {
@@ -2827,7 +3321,7 @@ async function sendRevise() {
 
   // 构造 GPT Image 兼容的 payload
   const payload = {
-    model: "gpt-image-2",
+    model: PPT_MODEL,
     input: {
       messages: [
         {
@@ -2966,6 +3460,8 @@ function bindEvents() {
   el.backToSplitBtn?.addEventListener("click", () => switchSmartStep("split"));
   el.pickReferenceFilesBtn?.addEventListener("click", () => el.referenceFilesInput?.click());
   el.referenceFilesInput?.addEventListener("change", handleReferenceFiles);
+  el.pickExtractedImportBtn?.addEventListener("click", () => el.extractedImportInput?.click());
+  el.extractedImportInput?.addEventListener("change", handleExtractedImportFile);
   el.runSplitBtn?.addEventListener("click", runSplit);
   el.skipSplitBtn?.addEventListener("click", skipSplit);
   el.cancelSplitBtn?.addEventListener("click", () => cancelAction("split"));
@@ -2999,15 +3495,21 @@ function bindEvents() {
     const page = getSelectedPage();
     const draft = ensurePageDraft(page);
     if (!draft) return;
-    applyDraftPromptForGeneration(draft, getCurrentSharedPromptValue());
+    applyDraftPromptForGeneration(draft, getCurrentSharedPromptValue(), page);
     saveState();
     syncCurrentPageGenerateUi();
   });
   el.pageGlobalStylePrompt?.addEventListener("input", () => {
     state.gptSharedStylePrompt = el.pageGlobalStylePrompt?.value?.trim() || "";
-    Object.values(state.pageDrafts || {}).forEach((draft) => {
+    const pagesById = new Map((state.workflowJob?.pages || []).map((page) => [page.id, page]));
+    Object.entries(state.pageDrafts || {}).forEach(([pageId, draft]) => {
       if (!draft) return;
-      applyDraftPromptForGeneration(draft, getEditablePagePromptFromValues(draft.sharedPrompt, draft.extraPrompt, draft.pageStylePrompt));
+      const page = pagesById.get(pageId);
+      applyDraftPromptForGeneration(
+        draft,
+        getEditablePagePromptFromValues(draft.sharedPrompt, draft.extraPrompt, draft.pageStylePrompt),
+        page
+      );
     });
     saveState();
     syncCurrentPageGenerateUi();
@@ -3018,6 +3520,9 @@ function bindEvents() {
   el.batchGenerateReadyBtn?.addEventListener("click", batchGenerateReadyPages);
   el.cancelBatchGenerateBtn?.addEventListener("click", () => cancelAction("batchGenerate"));
   el.addManualPageBtn?.addEventListener("click", addManualPage);
+  el.uploadPageReferenceBtn?.addEventListener("click", () => el.pageReferenceInput?.click());
+  el.pageReferenceInput?.addEventListener("change", handlePageReferenceFiles);
+  el.clearPageReferenceBtn?.addEventListener("click", clearCurrentPageReferences);
   el.uploadOverlayBtn?.addEventListener("click", () => el.overlayFileInput?.click());
   el.overlayFileInput?.addEventListener("change", handleOverlayFiles);
   el.clearOverlayBtn?.addEventListener("click", clearCurrentOverlays);
@@ -3041,6 +3546,19 @@ function bindEvents() {
   el.savePageImageModalBtn?.addEventListener("click", saveModalImage);
   document.querySelectorAll("[data-close-page-image-modal]").forEach((node) => {
     node.addEventListener("click", closeCurrentPageLargeImage);
+  });
+  el.referenceCropCloseBtn?.addEventListener("click", closeReferenceCropModal);
+  el.referenceCropSaveNewBtn?.addEventListener("click", () => saveReferenceCrop("new"));
+  el.referenceCropReplaceBtn?.addEventListener("click", () => saveReferenceCrop("replace"));
+  el.referenceCropStage?.addEventListener("pointerdown", beginReferenceCropSelection);
+  el.referenceCropImage?.addEventListener("load", () => {
+    if (referenceCropState) {
+      referenceCropState.crop = null;
+      renderReferenceCropBox();
+    }
+  });
+  document.querySelectorAll("[data-close-reference-crop-modal]").forEach((node) => {
+    node.addEventListener("click", closeReferenceCropModal);
   });
 
   el.reviseImportBtn.addEventListener("click", () => el.reviseFileInput.click());
@@ -3100,11 +3618,11 @@ function bindEvents() {
     saveState();
   });
   el.workflowImageModel?.addEventListener("change", () => {
-    setWorkflowImageModel(PPT_MODEL);
+    setWorkflowImageModel(el.workflowImageModel?.value || state.settings.workflowImageModel || PPT_MODEL);
     saveState();
   });
   el.workflowImageModelEntry?.addEventListener("change", () => {
-    setWorkflowImageModel(PPT_MODEL);
+    setWorkflowImageModel(el.workflowImageModelEntry?.value || state.settings.workflowImageModel || PPT_MODEL);
     saveState();
   });
   el.region?.addEventListener("change", () => { state.settings.region = el.region?.value || ""; saveState(); });
@@ -3116,7 +3634,10 @@ function bindEvents() {
   el.cancelTestApiKeyBtn?.addEventListener("click", () => cancelAction("testApi"));
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !el.pageImageModal?.hidden) {
+    if (event.key !== "Escape") return;
+    if (!el.referenceCropModal?.hidden) {
+      closeReferenceCropModal();
+    } else if (!el.pageImageModal?.hidden) {
       closeCurrentPageLargeImage();
     }
   });
@@ -3536,7 +4057,7 @@ async function batchGenerateReadyPagesLegacy() {
     };
     const generateOnePage = async (page) => {
       const draft = ensurePageDraft(page);
-      applyDraftPromptForGeneration(draft, getEditablePagePromptFromValues(draft.sharedPrompt, draft.extraPrompt, draft.pageStylePrompt));
+      applyDraftPromptForGeneration(draft, getEditablePagePromptFromValues(draft.sharedPrompt, draft.extraPrompt, draft.pageStylePrompt), page);
       return apiJson("/api/workflow/page/generate-v2", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3556,6 +4077,7 @@ async function batchGenerateReadyPagesLegacy() {
           extraPrompt: draft.extraPrompt || "",
           pageStylePrompt: draft.pageStylePrompt || "",
           onscreenContent: formatOnscreenPreview(draft.onscreenContent || page.onscreenContentText || page.onscreenContent || ""),
+          referenceImages: getPageReferenceSources(draft),
           canvasImage: "",
         }),
       });
@@ -3680,7 +4202,7 @@ async function batchGenerateReadyPages() {
 
     const generateOnePage = async (page) => {
       const draft = ensurePageDraft(page);
-      applyDraftPromptForGeneration(draft, getEditablePagePromptFromValues(draft.sharedPrompt, draft.extraPrompt, draft.pageStylePrompt));
+      applyDraftPromptForGeneration(draft, getEditablePagePromptFromValues(draft.sharedPrompt, draft.extraPrompt, draft.pageStylePrompt), page);
       return apiJson("/api/workflow/page/generate-v2", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3700,6 +4222,7 @@ async function batchGenerateReadyPages() {
           extraPrompt: draft.extraPrompt || "",
           pageStylePrompt: draft.pageStylePrompt || "",
           onscreenContent: formatOnscreenPreview(draft.onscreenContent || page.onscreenContentText || page.onscreenContent || ""),
+          referenceImages: getPageReferenceSources(draft),
           canvasImage: "",
         }),
       });
@@ -4147,15 +4670,15 @@ function renderPagesWorkbench() {
   if (el.pageOnscreenBodyEditor) el.pageOnscreenBodyEditor.value = draft.onscreenBody;
   if (el.pageOnscreenPreview) el.pageOnscreenPreview.innerHTML = "";
   if (el.pageExtraPromptField) el.pageExtraPromptField.hidden = false;
-  const editablePrompt = getEditablePagePromptFromValues(
-    draft.sharedPrompt,
-    draft.extraPrompt,
-    draft.pageStylePrompt,
-    page.promptTrace?.finalImage?.extraPrompt
-  );
+  const editablePrompt = getEditablePagePromptFromPage({
+    ...page,
+    sharedPrompt: draft.sharedPrompt,
+    extraPrompt: draft.extraPrompt,
+    pageStylePrompt: draft.pageStylePrompt,
+  });
   draft.sharedPrompt = editablePrompt;
   draft.extraPrompt = editablePrompt;
-  draft.pageStylePrompt = getEffectivePageStylePrompt(editablePrompt);
+  draft.pageStylePrompt = page.promptOnlyImport ? editablePrompt : getEffectivePageStylePrompt(editablePrompt);
   el.pageExtraPrompt.value = editablePrompt;
   el.pagePromptTrace.textContent = stringifyTrace(page.promptTrace);
   if (el.viewCurrentPageLargeBtn) {
@@ -4250,7 +4773,7 @@ async function copyCurrentPagePrompt() {
   }
   if (!ensureStandardWorkflowThemeReady("请先生成并确认风格，再复制标准链路提示词。")) return;
   const draft = ensurePageDraft(page);
-  applyDraftPromptForGeneration(draft, getCurrentSharedPromptValue());
+  applyDraftPromptForGeneration(draft, getCurrentSharedPromptValue(), page);
   draft.onscreenContent = updateCurrentPageDraftFromEditors();
   if (!(await ensureWorkflowJobRegisteredOrReport())) return;
   const promptTrace = page.promptTrace?.finalImage || null;
@@ -4285,6 +4808,7 @@ async function copyCurrentPagePrompt() {
           sharedPrompt: draft.sharedPrompt,
           extraPrompt: draft.extraPrompt,
           pageStylePrompt: draft.pageStylePrompt,
+          referenceImages: getPageReferenceSources(draft),
           canvasImage,
           onscreenContent: draft.onscreenContent,
         }),
@@ -4344,7 +4868,7 @@ async function generateCurrentPage() {
 
   if (!(await ensureWorkflowJobRegisteredOrReport())) return;
   const draft = ensurePageDraft(page);
-  applyDraftPromptForGeneration(draft, getCurrentSharedPromptValue());
+  applyDraftPromptForGeneration(draft, getCurrentSharedPromptValue(), page);
   draft.onscreenContent = updateCurrentPageDraftFromEditors();
   const requestKey = getPageGenerateRequestKey(page.id);
   const signal = startCancelableAction(requestKey, el.generateCurrentPageBtn, el.cancelGenerateCurrentPageBtn, page?.generated ? "重新生成中..." : "生成中...");
@@ -4374,6 +4898,7 @@ async function generateCurrentPage() {
         extraPrompt: draft.extraPrompt,
         pageStylePrompt: draft.pageStylePrompt,
         onscreenContent: draft.onscreenContent,
+        referenceImages: getPageReferenceSources(draft),
         canvasImage: "",
       }),
     });
@@ -4414,9 +4939,9 @@ async function modifyCurrentPage() {
   const draft = ensurePageDraft(page);
   draft.sharedPrompt = getCurrentSharedPromptValue();
   draft.extraPrompt = appendDrawingRemovalInstruction(draft.sharedPrompt, true);
-  draft.pageStylePrompt = usingGptSimpleWorkflow()
-    ? composeGptPageStylePrompt(draft.extraPrompt)
-    : draft.extraPrompt;
+  draft.pageStylePrompt = page.promptOnlyImport
+    ? draft.extraPrompt
+    : (usingGptSimpleWorkflow() ? composeGptPageStylePrompt(draft.extraPrompt) : draft.extraPrompt);
   draft.onscreenContent = updateCurrentPageDraftFromEditors();
   if (!draft.sharedPrompt) {
     setStatus("请先填写该页提示词，再按要求修改。", "error");
@@ -4471,6 +4996,7 @@ async function modifyCurrentPage() {
         extraPrompt: draft.extraPrompt,
         pageStylePrompt: draft.pageStylePrompt,
         onscreenContent: draft.onscreenContent,
+        referenceImages: getPageReferenceSources(draft),
         canvasImage,
       }),
     });

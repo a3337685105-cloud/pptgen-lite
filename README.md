@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-PPTGEN Studio Lite 是一个本地运行的 AI PPT 图片页工作台。它把长文本、草稿或参考文件拆成逐页内容，允许你逐页确认、补充提示词、生成图片页，最后导出为 PowerPoint 文件。
+PPTGEN Studio Lite 是一个本地运行的 AI PPT 图片页工作台，当前版本默认使用 `gpt-image-2-vip` 和 Grsai `https://grsai.dakka.com.cn/v1/api/generate` 作为最终生图链路。它把长文本、草稿或参考文件拆成逐页内容，允许你逐页确认、补充提示词、生成图片页，最后导出为 PowerPoint 文件。
 
 > 注意：当前导出的 PPT 是图片型幻灯片。它适合快速生成视觉完整的演示稿，但不能像普通 PPT 那样逐个编辑文本框、图形和图表对象。如果文字渲染有误，建议重新生成、使用改图区局部修改，或在 Office 中手动覆盖修正。
 
@@ -48,23 +48,25 @@ QWEN_API_KEY=your_qwen_key
 
 | Provider | Model |
 | --- | --- |
-| OpenAI-compatible image API | `gpt-image-2` |
+| Grsai / OpenAI-compatible image API | `gpt-image-2-vip` |
 
-需要配置 GPT 图片接口 Key：
+需要配置 Grsai / GPT 图片接口 Key：
 
 ```env
 OPENAI_IMAGE_API_KEY=your_image_api_key
 ```
 
-图片接口默认 Host 是 `https://api.bltcy.ai`。你可以在页面的“GPT Host / Endpoint”中填写，也可以通过环境变量配置：
+旧版使用的 `https://api.bltcy.ai` 代理已不再作为默认入口。当前默认 Endpoint 是 `https://grsai.dakka.com.cn/v1/api/generate`；你可以在页面的“GPT Host / Endpoint”中填写，也可以通过环境变量配置：
 
 ```env
-OPENAI_IMAGE_BASE_URL=https://your-image-host
-# 或直接填写完整 generations endpoint
-OPENAI_IMAGE_GENERATIONS_URL=https://your-image-host/v1/images/generations
+OPENAI_IMAGE_BASE_URL=https://grsai.dakka.com.cn/v1/api/generate
+# 也可以填写兼容主机，系统会自动补齐当前接口路径
+OPENAI_IMAGE_BASE_URL=https://grsaiapi.com
+# 或直接填写完整生成 endpoint
+OPENAI_IMAGE_GENERATIONS_URL=https://grsai.dakka.com.cn/v1/api/generate
 ```
 
-也支持填写多个 Host，用逗号、分号或换行分隔。可选的 WhatAI fallback：
+也支持填写多个 Host，用逗号、分号或换行分隔。旧的 `api.bltcy.ai`、OpenAI generations endpoint 或 Grsai `/v1/draw/completions` 会在运行时自动归一到当前 Grsai 生成接口。可选的 WhatAI fallback：
 
 ```env
 WHATAI_IMAGE_API_KEY=your_fallback_key
@@ -75,7 +77,7 @@ WHATAI_IMAGE_API_KEY=your_fallback_key
 - Windows 10 / 11
 - Node.js 18+
 - DashScope / Qwen API Key
-- OpenAI-compatible 图片接口 Key，模型为 `gpt-image-2`
+- Grsai / OpenAI-compatible 图片接口 Key，模型为 `gpt-image-2-vip`
 
 ## 启动
 

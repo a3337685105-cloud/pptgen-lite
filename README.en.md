@@ -2,7 +2,7 @@
 
 [中文](README.md)
 
-PPTGEN Studio Lite is a local AI workspace for creating image-based slide decks. It turns long-form text, rough drafts, and reference files into page-by-page slide content, lets you review and refine each page, generates finished slide images, and exports them as a PowerPoint deck.
+PPTGEN Studio Lite is a local AI workspace for creating image-based slide decks. The current build defaults to `gpt-image-2-vip` through the Grsai endpoint `https://grsai.dakka.com.cn/v1/api/generate`. It turns long-form text, rough drafts, and reference files into page-by-page slide content, lets you review and refine each page, generates finished slide images, and exports them as a PowerPoint deck.
 
 > Note: exported decks are image-based PowerPoint files. They are useful for producing visually complete slides quickly, but the text, shapes, and charts are not editable as native PowerPoint objects. If rendered text is wrong, regenerate the page, use the image revision workspace, or patch the text manually in Office.
 
@@ -48,23 +48,25 @@ The active workflow currently uses:
 
 | Provider | Model |
 | --- | --- |
-| OpenAI-compatible image API | `gpt-image-2` |
+| Grsai / OpenAI-compatible image API | `gpt-image-2-vip` |
 
-Configure an image API key:
+Configure a Grsai / GPT image API key:
 
 ```env
 OPENAI_IMAGE_API_KEY=your_image_api_key
 ```
 
-The default image host is `https://api.bltcy.ai`. You can override it in the UI under "GPT Host / Endpoint" or with environment variables:
+The old `https://api.bltcy.ai` proxy is no longer the default entry point. The current default endpoint is `https://grsai.dakka.com.cn/v1/api/generate`; you can override it in the UI under "GPT Host / Endpoint" or with environment variables:
 
 ```env
-OPENAI_IMAGE_BASE_URL=https://your-image-host
-# or provide the full generations endpoint
-OPENAI_IMAGE_GENERATIONS_URL=https://your-image-host/v1/images/generations
+OPENAI_IMAGE_BASE_URL=https://grsai.dakka.com.cn/v1/api/generate
+# or provide a compatible host; the app normalizes it to the current endpoint
+OPENAI_IMAGE_BASE_URL=https://grsaiapi.com
+# or provide the full generation endpoint
+OPENAI_IMAGE_GENERATIONS_URL=https://grsai.dakka.com.cn/v1/api/generate
 ```
 
-Multiple hosts are supported when separated by commas, semicolons, or new lines. Optional WhatAI fallback:
+Multiple hosts are supported when separated by commas, semicolons, or new lines. Legacy `api.bltcy.ai`, OpenAI generations endpoints, and Grsai `/v1/draw/completions` values are normalized to the current Grsai generation API at runtime. Optional WhatAI fallback:
 
 ```env
 WHATAI_IMAGE_API_KEY=your_fallback_key
@@ -75,7 +77,7 @@ WHATAI_IMAGE_API_KEY=your_fallback_key
 - Windows 10 / 11
 - Node.js 18+
 - DashScope / Qwen API key
-- OpenAI-compatible image API key for `gpt-image-2`
+- Grsai / OpenAI-compatible image API key for `gpt-image-2-vip`
 
 ## Start
 

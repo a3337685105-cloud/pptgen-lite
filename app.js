@@ -1,11 +1,12 @@
 const STORAGE_KEY = "ppt-studio-v2-mainline";
 const SETTINGS_STORAGE_KEY = `${STORAGE_KEY}:settings`;
 const DEFAULT_REGION = "beijing";
-const PPT_MODEL = "gpt-image-2";
+const PPT_MODEL = "gpt-image-2-vip";
 const OPENAI_WORKFLOW_MODELS = new Set([
   "gpt-image-2",
+  "gpt-image-2-vip",
 ]);
-const OPENAI_IMAGE_DEFAULT_HOST = "https://api.bltcy.ai";
+const OPENAI_IMAGE_DEFAULT_HOST = "https://grsai.dakka.com.cn/v1/api/generate";
 const MAX_REVISE_BOXES = 2;
 const SLIDE_EMPTY_DEFAULT_TEXT = "生成前这里是空白画布。生成后，结果图会自动成为这页的底图。";
 const SLIDE_IMAGE_BROKEN_TEXT = "图片文件或链接已失效，无法显示。可以切换历史版本，或重新生成这一页。";
@@ -913,9 +914,21 @@ function normalizeOpenAiImageBaseUrl(value) {
     .split(/[\n,;]+/)
     .map((item) => item.trim().replace(/\/+$/, ""))
     .filter(Boolean)
-    .map((item) => (item === "https://api.openai.com" || item === "https://api.openai.com/v1/images/generations")
-      ? OPENAI_IMAGE_DEFAULT_HOST
-      : item);
+    .map((item) => {
+      if (item === "https://api.openai.com" || item === "https://api.openai.com/v1/images/generations") {
+        return OPENAI_IMAGE_DEFAULT_HOST;
+      }
+      if (/^https:\/\/(?:grsaiapi\.com|grsai\.dakka\.com\.cn)$/i.test(item)) {
+        return `${item}/v1/api/generate`;
+      }
+      if (/^https:\/\/(?:grsaiapi\.com|grsai\.dakka\.com\.cn)\/v1$/i.test(item)) {
+        return `${item}/api/generate`;
+      }
+      if (/^https:\/\/(?:grsaiapi\.com|grsai\.dakka\.com\.cn)\/v1\/draw\/completions$/i.test(item)) {
+        return item.replace(/\/v1\/draw\/completions$/i, "/v1/api/generate");
+      }
+      return item;
+    });
   return Array.from(new Set(endpoints)).join(", ") || OPENAI_IMAGE_DEFAULT_HOST;
 }
 
@@ -928,7 +941,7 @@ function getCurrentHostedImageKeyPayload() {
 }
 
 const WORKFLOW_IMAGE_MODEL_OPTIONS = [
-    `<option value="gpt-image-2">GPT Image 2</option>`,
+    `<option value="gpt-image-2-vip">GPT Image 2 VIP</option>`,
 ];
 
 function getWorkflowModelSelects() {
@@ -972,7 +985,7 @@ function syncQuickKeyPlaceholders() {
     element.placeholder = isConfigured ? `${baseText}；本机已配置可留空` : baseText;
   };
   setPlaceholder(el.quickApiKey, "用于内容拆分和风格匹配", ck.dashscope);
-  setPlaceholder(el.quickOpenAiImageApiKey, "用于 gpt-image-2", ck.openAiImage);
+  setPlaceholder(el.quickOpenAiImageApiKey, "用于 gpt-image-2-vip", ck.openAiImage);
 }
 
 function syncWorkflowModeUi() {
@@ -982,6 +995,14 @@ function syncWorkflowModeUi() {
   document.body.dataset.workflowProvider = isGpt ? "openai" : "standard";
   if (el.quickOpenAiImageKeyField) el.quickOpenAiImageKeyField.hidden = !isSimple;
   if (el.quickOpenAiImageBaseUrlField) el.quickOpenAiImageBaseUrlField.hidden = !isSimple;
+  if (el.quickOpenAiImageApiKey) el.quickOpenAiImageApiKey.placeholder = "for gpt-image-2-vip";
+  if (el.openAiImageApiKey) el.openAiImageApiKey.placeholder = "for gpt-image-2-vip";
+  if (el.quickOpenAiImageBaseUrl) el.quickOpenAiImageBaseUrl.placeholder = OPENAI_IMAGE_DEFAULT_HOST;
+  if (el.openAiImageBaseUrl) el.openAiImageBaseUrl.placeholder = OPENAI_IMAGE_DEFAULT_HOST;
+  const openAiImageBaseUrlHint = document.querySelector("#openAiImageBaseUrlField .field-hint");
+  if (openAiImageBaseUrlHint) {
+    openAiImageBaseUrlHint.textContent = "Default Grsai endpoint: /v1/api/generate; hosts like https://grsaiapi.com are also accepted.";
+  }
   document.querySelectorAll('[data-step="theme"]').forEach((button) => {
     button.disabled = isSimple;
     button.classList.toggle("is-disabled", isSimple);
@@ -2827,7 +2848,7 @@ async function sendRevise() {
 
   // 构造 GPT Image 兼容的 payload
   const payload = {
-    model: "gpt-image-2",
+    model: PPT_MODEL,
     input: {
       messages: [
         {

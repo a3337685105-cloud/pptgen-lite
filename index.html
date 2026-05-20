@@ -81,7 +81,7 @@
             <div class="smart-stage-shell">
               <!-- 隐藏的模型选择器，保持 JS 兼容 -->
               <select id="workflowImageModelEntry" class="sr-only" aria-label="最终生图模型" hidden>
-                <option value="gpt-image-2">GPT Image 2</option>
+                <option value="gpt-image-2-vip">GPT Image 2 VIP</option>
               </select>
               <div id="workflowModelHint" hidden></div>
               <button id="confirmWorkflowModelBtn" hidden></button>
@@ -118,11 +118,11 @@
                       </label>
                       <label class="field" id="quickOpenAiImageKeyField">
                         <span>GPT API Key</span>
-                        <input id="quickOpenAiImageApiKey" type="password" placeholder="用于 gpt-image-2" />
+                        <input id="quickOpenAiImageApiKey" type="password" placeholder="用于 gpt-image-2-vip" />
                       </label>
                       <label class="field" id="quickOpenAiImageBaseUrlField">
                         <span>GPT Host / Endpoint</span>
-                        <input id="quickOpenAiImageBaseUrl" type="text" placeholder="https://api.bltcy.ai, https://backup-host" />
+                        <input id="quickOpenAiImageBaseUrl" type="text" placeholder="https://grsai.dakka.com.cn/v1/api/generate" />
                       </label>
                       <button class="btn secondary" type="button" id="quickTestApiKeyBtn">测试 Key</button>
                     </div>
@@ -381,16 +381,16 @@
                   <label class="field" hidden>
                     <span>最终生图模型</span>
                     <select id="workflowImageModel">
-                      <option value="gpt-image-2">GPT Image 2</option>
+                      <option value="gpt-image-2-vip">GPT Image 2 VIP</option>
                     </select>
                   </label>
                   <label class="field">
                     <span>GPT API Key</span>
-                    <input id="openAiImageApiKey" type="password" placeholder="用于 gpt-image-2" />
+                    <input id="openAiImageApiKey" type="password" placeholder="用于 gpt-image-2-vip" />
                   </label>
                   <label class="field">
                     <span>GPT Host / Endpoint</span>
-                    <input id="openAiImageBaseUrl" type="text" placeholder="https://api.bltcy.ai, https://your-backup-host" />
+                    <input id="openAiImageBaseUrl" type="text" placeholder="https://grsai.dakka.com.cn/v1/api/generate" />
                     <span class="field-hint" style="font-size: 12px; color: #94a3b8; margin-top: 2px; display: block;">注意：OpenAI 官方 API 在中国大陆可能无法直接访问，建议使用中转代理地址</span>
                   </label>
                   <label class="field">
